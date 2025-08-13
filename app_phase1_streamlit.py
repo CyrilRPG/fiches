@@ -1,19 +1,22 @@
-import io, zipfile, re, os, xml.etree.ElementTree as ET
+# app_phase1_streamlit.py
+import io, zipfile, re, xml.etree.ElementTree as ET
 from typing import Dict, Tuple
 import streamlit as st
 
 # ---------- Namespaces ----------
-W  = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
-A  = "http://schemas.openxmlformats.org/drawingml/2006/main"
-PIC= "http://schemas.openxmlformats.org/drawingml/2006/picture"
-R  = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+W   = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+WP  = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+A   = "http://schemas.openxmlformats.org/drawingml/2006/main"
+PIC = "http://schemas.openxmlformats.org/drawingml/2006/picture"
+R   = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 P_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
 WPS = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+VML_NS = "urn:schemas-microsoft-com:vml"
 
-NS = {"w":W, "wp":WP, "a":A, "pic":PIC, "r":R, "wps":WPS}
+NS = {"w":W, "wp":WP, "a":A, "pic":PIC, "r":R, "wps":WPS, "v":VML_NS}
 for k,v in NS.items(): ET.register_namespace(k, v)
 
+# ---------- Rules ----------
 TARGETS = ["2024-2025","2024 - 2025","2024\u00A0-\u00A02025"]
 REPL    = "2025 - 2026"
 ROMAN_RE = re.compile(r"^\s*[IVXLC]+\s*[.)]?\s+.+", re.IGNORECASE)
@@ -44,7 +47,8 @@ def set_run_props(run, size=None, bold=None, italic=None, color=None, calibri=Fa
         (rPr.find("w:color", NS) or ET.SubElement(rPr, f"{{{W}}}color")).set(f"{{{W}}}val", color)
 
 def set_dml_text_size_in_txbody(txbody, pt: float):
-    val = str(int(round(pt*100)))  # DrawingML size = pt*100
+    """Set size in DrawingML text body (pt -> *100)."""
+    val = str(int(round(pt*100)))
     for r in txbody.findall(".//a:r", NS):
         rPr = r.find("a:rPr", NS) or ET.SubElement(r, f"{{{A}}}rPr")
         rPr.set("sz", val)
@@ -53,9 +57,9 @@ def redistribute(nodes, new):
     lens = [len(n.text or "") for n in nodes]; pos = 0
     for i,n in enumerate(nodes):
         n.text = new[pos:pos+lens[i]] if i < len(nodes)-1 else new[pos:]
-        pos += 0 if i == len(nodes)-1 else lens[i]
+        if i < len(nodes)-1: pos += lens[i]
 
-# ---------- Text replacements ----------
+# ---------- Text replacements & styling ----------
 def replace_years(root):
     # w:t
     for p in root.findall(".//w:p", NS):
@@ -64,7 +68,7 @@ def replace_years(root):
         txt = "".join(t.text or "" for t in wts); new = txt
         for tgt in TARGETS: new = new.replace(tgt, REPL)
         if new != txt: redistribute(wts, new)
-    # a:t (formes)
+    # a:t (shapes)
     ats = root.findall(".//a:txBody//a:t", NS)
     if ats:
         txt = "".join(t.text or "" for t in ats); new = txt
@@ -80,41 +84,56 @@ def red_to_black(root):
         if c is not None and (c.get(f"{{{W}}}val","").upper() == "FF0000"): c.set(f"{{{W}}}val","000000")
 
 def cover_sizes_cleanup(root):
+    """Keep layout as-is but enforce sizes:
+    - University + year: 10
+    - 'Fiche de cours …': 22
+    - Course name (next non-empty para after 'Fiche …'): 20
+    - PLAN (title + items on cover): 11
+    - Remove 'ACTUALISATION'
+    """
     paras = root.findall(".//w:p", NS)
     texts = [get_text(p).strip() for p in paras]
     def set_size(p, pt):  [set_run_props(r, size=pt) for r in p.findall(".//w:r", NS)]
+
     last_was_fiche = False
     in_plan = False
+
     for i, txt in enumerate(texts):
         low = txt.lower()
+
+        # remove ACTUALISATION
+        if txt.strip().upper() == "ACTUALISATION":
+            for t in paras[i].findall(".//w:t", NS):
+                if t.text: t.text = re.sub(r"(?i)ACTUALISATION","",t.text)
+            continue
+
+        # sizes
         if "fiche de cours" in low:
             set_size(paras[i], 22)
             last_was_fiche = True
             in_plan = False
             continue
+
         if last_was_fiche and txt:
-            set_size(paras[i], 20)
+            set_size(paras[i], 20)  # course name
             last_was_fiche = False
+
+        if "université" in low and (any(x.replace("\u00A0"," ") in txt.replace("\u00A0"," ") for x in TARGETS+[REPL])):
+            set_size(paras[i], 10)
+
         if txt.strip().upper() == "PLAN":
             set_size(paras[i], 11)
             in_plan = True
             continue
+
         if in_plan:
             if txt.strip() == "" or low.startswith("légende"):
                 in_plan = False
             else:
                 set_size(paras[i], 11)
-            continue
-        if "université" in low and (any(x.replace("\u00A0"," ") in txt.replace("\u00A0"," ") for x in TARGETS+[REPL])):
-            set_size(paras[i], 10)
-        if "introduction" in low and "biologie" in low:
-            set_size(paras[i], 20)
-        if txt.strip().upper() == "ACTUALISATION":
-            for t in paras[i].findall(".//w:t", NS):
-                if t.text: t.text = re.sub(r"(?i)ACTUALISATION","",t.text)
 
 def tables_and_numbering(root):
-    # titre de tableau 12 gras ; reste 9
+    # table title 12 bold; body 9
     for tbl in root.findall(".//w:tbl", NS):
         rows = tbl.findall(".//w:tr", NS)
         if not rows: continue
@@ -123,13 +142,13 @@ def tables_and_numbering(root):
         for tr in rows[1:]:
             for p in tr.findall(".//w:p", NS):
                 for r in p.findall(".//w:r", NS): set_run_props(r, size=9)
-    # numérotation romaine → 10 / italic / gras / blanc
+    # roman numbering line
     for p in root.findall(".//w:p", NS):
         if ROMAN_RE.match(get_text(p).strip() or ""):
             for r in p.findall(".//w:r", NS):
                 set_run_props(r, size=10, bold=True, italic=True, color="FFFFFF")
 
-# ---------- Grey cover rectangle removal ----------
+# ---------- Grey cover rectangle removal (robust) ----------
 def build_parent_map(root): return {child: parent for parent in root.iter() for child in parent}
 def hex_to_rgb(h): h=h.strip().lstrip("#"); return (int(h[0:2],16),int(h[2:4],16),int(h[4:6],16)) if len(h)==6 else (0,0,0)
 def is_close_grey(val, target="#F2F2F2", tol=16):
@@ -139,13 +158,10 @@ def is_close_grey(val, target="#F2F2F2", tol=16):
     except: return False
 
 def extract_theme_colors(parts: Dict[str, bytes]) -> Dict[str, str]:
-    """Retourne un mapping schemeClr -> sRGB à partir du thème, si disponible."""
     data = parts.get("word/theme/theme1.xml")
     if not data: return {}
-    try:
-        root = ET.fromstring(data)
-    except ET.ParseError:
-        return {}
+    try: root = ET.fromstring(data)
+    except ET.ParseError: return {}
     colors = {}
     cs = root.find(".//a:clrScheme", NS)
     if cs is None: return colors
@@ -167,12 +183,9 @@ def looks_like_cover_shape(holder):
     except: return True
 
 def remove_large_grey_rectangles(root, theme_colors: Dict[str, str]):
-    """
-    Supprime les grands rectangles gris (#F2F2F2 ± tolérance) de la page de garde,
-    y compris 'roundRect', inline/anchor et groupes. Si la forme est très grande
-    (>=10cm x >=10cm), on la supprime même si elle est un peu plus basse (notes).
-    """
     parent_map = build_parent_map(root)
+
+    # DrawingML shapes
     for drawing in root.findall(".//w:drawing", NS):
         holder = drawing.find(".//wp:anchor", NS) or drawing.find(".//wp:inline", NS)
         if holder is None: continue
@@ -184,7 +197,7 @@ def remove_large_grey_rectangles(root, theme_colors: Dict[str, str]):
 
         has_pic = holder.find(".//pic:pic", NS) is not None
 
-        # couleurs
+        # gather colors (srgb + scheme with luminance)
         srgb = [el.get("val","").upper() for el in holder.findall(".//a:srgbClr", NS)]
         for sc in holder.findall(".//a:schemeClr", NS):
             val = sc.get("val", "").lower()
@@ -198,9 +211,8 @@ def remove_large_grey_rectangles(root, theme_colors: Dict[str, str]):
             g = min(255, int(g * mod + 255 * off))
             b = min(255, int(b * mod + 255 * off))
             srgb.append(f"{r:02X}{g:02X}{b:02X}")
-        looks_f2 = any(is_close_grey(v, "#F2F2F2", 16) for v in srgb)
 
-        # rectangle (rect / roundRect)
+        looks_f2 = any(is_close_grey(v, "#F2F2F2", 16) for v in srgb)
         is_rect = holder.find(".//a:prstGeom[@prst='rect']", NS) is not None \
                or holder.find(".//a:prstGeom[@prst='roundRect']", NS) is not None
 
@@ -211,24 +223,24 @@ def remove_large_grey_rectangles(root, theme_colors: Dict[str, str]):
             parent = parent_map.get(drawing)
             if parent is not None: parent.remove(drawing)
 
-    # VML shapes
-    VML = {"v": "urn:schemas-microsoft-com:vml"}
+    # VML (old shapes)
     for pict in root.findall(".//w:pict", NS):
-        for shape in pict.findall(".//v:rect", VML) + pict.findall(".//v:roundrect", VML) + pict.findall(".//v:shape", VML):
-            fill = (shape.get("fillcolor", "") or "").upper()
-            if not is_close_grey(fill, "#F2F2F2", 16):
-                continue
-            style = shape.get("style", "")
-            m_w = re.search(r"width:([0-9.]+)cm", style)
-            m_h = re.search(r"height:([0-9.]+)cm", style)
-            if m_w and m_h:
-                w = float(m_w.group(1)); h = float(m_h.group(1))
-                big_on_cover = w >= 6 and h >= 8
-                very_big_anywhere = w >= 10 and h >= 10
-                if big_on_cover or very_big_anywhere:
-                    parent = parent_map.get(pict)
-                    if parent is not None:
-                        parent.remove(pict)
+        # rect / roundrect / shape
+        for tag in ("rect","roundrect","shape"):
+            for shape in pict.findall(f".//v:{tag}", NS):
+                fill = (shape.get("fillcolor", "") or "").upper()
+                if not is_close_grey(fill, "#F2F2F2", 16):  # only the light grey cover box
+                    continue
+                style = shape.get("style", "")
+                m_w = re.search(r"width:([0-9.]+)cm", style)
+                m_h = re.search(r"height:([0-9.]+)cm", style)
+                if m_w and m_h:
+                    w = float(m_w.group(1)); h = float(m_h.group(1))
+                    big_on_cover = w >= 6 and h >= 8
+                    very_big_anywhere = w >= 10 and h >= 10
+                    if big_on_cover or very_big_anywhere:
+                        parent = parent_map.get(pict)
+                        if parent is not None: parent.remove(pict)
 
 # ---------- Legend image ----------
 def build_anchored_image(rId, width_cm, height_cm, left_cm, top_cm, name="Legende"):
@@ -268,9 +280,11 @@ def build_anchored_image(rId, width_cm, height_cm, left_cm, top_cm, name="Legend
 
 def remove_legend_text(document_xml: bytes) -> bytes:
     root = ET.fromstring(document_xml)
+    # "Légendes" title
     for p in root.findall(".//w:p", NS):
         if get_text(p).strip().lower() == "légendes":
             for t in p.findall(".//w:t", NS): t.text = ""
+    # lines
     lines = {"Notion nouvelle cette année","Notion hors programme","Notion déjà tombée au concours","Astuces et méthodes"}
     for p in root.findall(".//w:p", NS):
         if get_text(p).strip() in lines:
@@ -335,9 +349,8 @@ def force_footer_size_10(root):
     for r in root.findall(".//w:r", NS): set_run_props(r, size=10)
     set_dml_text_size(root, 10.0)
 
-# ---------- DML cover text sizing ----------
+# ---------- DML/WPS text sizing on cover (shapes) ----------
 def tune_cover_dml_textsizes(root):
-    """Forcer tailles DML sur la couverture : université 10, 'Fiche de cours' 22, nom du cours 20."""
     last_was_fiche = False
     for holder in root.findall(".//wp:anchor", NS) + root.findall(".//wp:inline", NS):
         tx = holder.find(".//a:txBody", NS)
@@ -345,28 +358,26 @@ def tune_cover_dml_textsizes(root):
         text = "".join(t.text or "" for t in tx.findall(".//a:t", NS)).strip().lower()
         if not text: continue
         if ("universite" in text) or ("université" in text):
-            set_dml_text_size_in_txbody(tx, 10.0)
-            last_was_fiche = False
+            set_dml_text_size_in_txbody(tx, 10.0); last_was_fiche = False
         elif "fiche de cours" in text:
-            set_dml_text_size_in_txbody(tx, 22.0)
-            last_was_fiche = True
+            set_dml_text_size_in_txbody(tx, 22.0); last_was_fiche = True
         elif last_was_fiche:
-            set_dml_text_size_in_txbody(tx, 20.0)
-            last_was_fiche = False
+            set_dml_text_size_in_txbody(tx, 20.0); last_was_fiche = False
         elif ("introduction" in text) and ("biologie" in text):
-            set_dml_text_size_in_txbody(tx, 20.0)
-            last_was_fiche = False
+            set_dml_text_size_in_txbody(tx, 20.0); last_was_fiche = False
+        # also strip ACTUALISATION if it appears inside a shape
+        if "actualisation" in text:
+            for t in tx.findall(".//a:t", NS):
+                if t.text: t.text = re.sub(r"(?i)actualisation","",t.text)
 
 def tune_cover_wps_textsizes(root):
-    """Force tailles des zones de texte WPS sur la couverture (université 10, fiche 22, cours 20)."""
     last_was_fiche = False
     for holder in root.findall(".//wp:anchor", NS) + root.findall(".//wp:inline", NS):
         if not looks_like_cover_shape(holder): continue
         txbx = holder.find(".//wps:txbx/w:txbxContent", NS)
         if txbx is None: continue
         full = "".join(t.text or "" for t in txbx.findall(".//w:t", NS)).strip().lower()
-        if not full:
-            continue
+        if not full: continue
         if "universite" in full or "université" in full:
             for r in txbx.findall(".//w:r", NS): set_run_props(r, size=10)
             last_was_fiche = False
@@ -379,6 +390,10 @@ def tune_cover_wps_textsizes(root):
         elif "introduction" in full and "biologie" in full:
             for r in txbx.findall(".//w:r", NS): set_run_props(r, size=20)
             last_was_fiche = False
+        # remove ACTUALISATION in WPS textboxes too
+        if "actualisation" in full:
+            for t in txbx.findall(".//w:t", NS):
+                if t.text: t.text = re.sub(r"(?i)actualisation","",t.text)
 
 # ---------- Pipeline ----------
 def process_bytes(docx_bytes: bytes,
@@ -401,11 +416,9 @@ def process_bytes(docx_bytes: bytes,
         red_to_black(root)
 
         if name == "word/document.xml":
-            cover_sizes_cleanup(root)           # w:p tailles (déjà en place)
-            tune_cover_dml_textsizes(root)      # tailles DML (formes)
-            tune_cover_wps_textsizes(root)      # tailles WPS (zones de texte)
             cover_sizes_cleanup(root)           # w:p
-            tune_cover_dml_textsizes(root)      # formes DML (fix inversion fiche/introduction)
+            tune_cover_dml_textsizes(root)      # shapes DML
+            tune_cover_wps_textsizes(root)      # shapes WPS
             tables_and_numbering(root)
             reposition_small_icon(root, icon_left, icon_top)
             remove_large_grey_rectangles(root, theme_colors)
@@ -415,6 +428,7 @@ def process_bytes(docx_bytes: bytes,
 
         parts[name] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
+    # legend image (optional)
     if legend_bytes and "word/document.xml" in parts and "word/_rels/document.xml.rels" in parts:
         parts["word/document.xml"] = remove_legend_text(parts["word/document.xml"])
         new_doc, new_rels, media = insert_legend_image(
@@ -433,7 +447,7 @@ def process_bytes(docx_bytes: bytes,
 # ---------- UI ----------
 st.set_page_config(page_title="Diploma Santé – Phase I", page_icon="🧠", layout="centered")
 st.title("🧠 Programme ultime – Phase I")
-st.caption("Transforme tes .docx en préservant 100% du design et en appliquant toutes les règles demandées.")
+st.caption("Modifie le .docx en gardant 100% du design + règles demandées.")
 
 with st.sidebar:
     st.subheader("Paramètres (cm)")
@@ -446,12 +460,12 @@ with st.sidebar:
 
 st.markdown("**1) Glisse/dépose un ou plusieurs fichiers `.docx`**")
 files = st.file_uploader("DOCX à traiter", type=["docx"], accept_multiple_files=True)
-st.markdown("**2) Ajoute l’image de la Légende (PNG/JPG)**")
+st.markdown("**2) (Optionnel) Ajoute l’image de la Légende (PNG/JPG)**")
 legend_file = st.file_uploader("Image Légendes", type=["png","jpg","jpeg","webp"], accept_multiple_files=False)
 
 if st.button("⚙️ Lancer le traitement", type="primary", disabled=not files):
     if not files:
-        st.warning("Ajoute au moins un fichier .docx")
+        st.warning("Ajoute au moins un .docx")
     else:
         legend_bytes = legend_file.read() if legend_file else None
         for up in files:
