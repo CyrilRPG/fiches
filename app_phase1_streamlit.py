@@ -176,7 +176,7 @@ def build_anchored_image(rId, width_cm, height_cm, left_cm, top_cm, name="Legend
     ET.SubElement(anchor, f"{{{WP}}}effectExtent", {"l":"0","t":"0","r":"0","b":"0"})
     ET.SubElement(anchor, f"{{{WP}}}wrapNone")
     ET.SubElement(anchor, f"{{{WP}}}docPr", {"id":"10","name":name})
-    ET.SubElement(anchor, f"{{{WP}}}cNvGraphicFramePr")
+    ET.SubElement(anchor, f"{{{WP}}}cNvGraphicFramePr")   # <-- corrigé
     graphic = ET.SubElement(anchor, f"{{{A}}}graphic")
     gData   = ET.SubElement(graphic, f"{{{A}}}graphicData", {"uri":"http://schemas.openxmlformats.org/drawingml/2006/picture"})
     pic     = ET.SubElement(gData, f"{{{PIC}}}pic")
@@ -184,7 +184,8 @@ def build_anchored_image(rId, width_cm, height_cm, left_cm, top_cm, name="Legend
     ET.SubElement(nvPicPr, f"{{{PIC}}}cNvPr", {"id":"0","name":name+".img"})
     ET.SubElement(nvPicPr, f"{{{PIC}}}cNvPicPr")
     blipFill= ET.SubElement(pic, f"{{{PIC}}}blipFill")
-    ET.SubElement(blipFill, f"{{{A}}}blip", {f"{{{R}}}embed": "RID_PLACEHOLDER"})
+    # on injecte directement le rId ici (pas de placeholder)
+    ET.SubElement(blipFill, f"{{{A}}}blip", {f"{{{R}}}embed": rId})
     stretch = ET.SubElement(blipFill, f"{{{A}}}stretch"); ET.SubElement(stretch, f"{{{A}}}fillRect")
     spPr    = ET.SubElement(pic, f"{{{PIC}}}spPr")
     xfrm    = ET.SubElement(spPr, f"{{{A}}}xfrm")
@@ -197,8 +198,6 @@ def remove_legend_text(document_xml: bytes) -> bytes:
     root = ET.fromstring(document_xml)
     for p in root.findall(".//w:p", NS):
         if get_text(p).strip().lower() == "légendes":
-            for t in p.findAll(".//w:t", NS):  # compat fallback
-                t.text = ""
             for t in p.findall(".//w:t", NS):
                 t.text = ""
     LINES = {"Notion nouvelle cette année","Notion hors programme","Notion déjà tombée au concours","Astuces et méthodes"}
@@ -234,11 +233,8 @@ def insert_legend_image(document_xml: bytes, rels_xml: bytes, image_bytes: bytes
     rel.set("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image")
     rel.set("Target", media_name)
 
-    # build drawing and set the rId
+    # build drawing using the new rId (no placeholder)
     drawing = build_anchored_image(new_rid, width_cm, height_cm, left_cm, top_cm, "Legende")
-    # patch RID placeholder
-    blip = drawing.find(".//a:blip", NS)
-    if blip is not None: blip.set(f"{{{R}}}embed", new_rid)
 
     if idx is not None:
         ET.SubElement(paras[idx], f"{{{W}}}r").append(drawing)
