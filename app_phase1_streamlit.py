@@ -104,6 +104,7 @@ def replace_years(root):
             redistribute(ats, new)
 
 def strip_actualisation_everywhere(root):
+    """Supprime « ACTUALISATION » et « NOUVELLE FICHE » dans tous les textes."""
     for t in root.findall(".//w:t", NS) + root.findall(".//a:t", NS):
         if t.text:
             t.text = re.sub(r"(?iu)\b(actualisation|nouvelle\s+fiche)\b", "", t.text)
@@ -148,6 +149,13 @@ def set_tx_size(holder, pt: float):
 
 # ───────────────────────── Mise en forme couverture (paragraphes) ─
 def cover_sizes_cleanup(root):
+    """
+    Applique les tailles spécifiques aux paragraphes de la couverture :
+    - « Fiche de cours … » → 22 pt
+    - La ligne suivante non vide → 20 pt (nom du cours)
+    - Paragraphes contenant « université » + année → 10 pt
+    - Enlève « ACTUALISATION » et « NOUVELLE FICHE »
+    """
     paras = root.findall(".//w:p", NS)
     texts = [get_text(p).strip() for p in paras]
 
@@ -158,13 +166,11 @@ def cover_sizes_cleanup(root):
     last_was_fiche = False
     for i, txt in enumerate(texts):
         low = txt.lower()
-
         if txt.strip().upper() in ("ACTUALISATION", "NOUVELLE FICHE"):
             for t in paras[i].findall(".//w:t", NS):
                 if t.text:
                     t.text = re.sub(r"(?iu)\b(actualisation|nouvelle\s+fiche)\b", "", t.text)
             continue
-
         if "fiche de cours" in low:
             set_size(paras[i], 22)
             last_was_fiche = True
@@ -172,14 +178,15 @@ def cover_sizes_cleanup(root):
         if last_was_fiche and txt:
             set_size(paras[i], 20)
             last_was_fiche = False
-
         if "université" in low and any(
-            x.replace("\u00A0", " ") in txt.replace("\u00A0", " ") for x in TARGETS + [REPL]
+            x.replace("\u00A0", " ") in txt.replace("\u00A0", " ")
+            for x in TARGETS + [REPL]
         ):
             set_size(paras[i], 10)
 
 # ───────────────────────── Couverture : formes DML/WPS (spatial) ──
 def tune_cover_shapes_spatial(root):
+    """Ajuste tailles des formes de la page de garde."""
     holders = []
     for holder in root.findall(".//wp:anchor", NS) + root.findall(".//wp:inline", NS):
         txt = get_tx_text(holder)
@@ -190,14 +197,15 @@ def tune_cover_shapes_spatial(root):
     if not holders:
         return
     holders.sort(key=lambda t: (t[0], t[1]))
-
+    # université + année -> 10
     for _, _, h, txt in holders:
         low = txt.lower()
         if ("universite" in low or "université" in low) and any(
-            t.replace("\u00A0", " ") in txt.replace("\u00A0", " ") for t in TARGETS + [REPL]
+            t.replace("\u00A0", " ") in txt.replace("\u00A0", " ")
+            for t in TARGETS + [REPL]
         ):
             set_tx_size(h, 10.0)
-
+    # Fiche de cours -> 22, ligne suivante non vide -> 20
     idx_fiche = None
     for i, (_, _, h, txt) in enumerate(holders):
         if "fiche de cours" in txt.lower():
@@ -210,7 +218,7 @@ def tune_cover_shapes_spatial(root):
             if txt_next and "fiche de cours" not in txt_next.lower():
                 set_tx_size(holders[j][2], 20.0)
                 break
-
+    # nettoyage libellés
     for _, _, h, _ in holders:
         tx = h.find(".//a:txBody", NS)
         if tx is not None:
@@ -253,6 +261,7 @@ def _near_gray_f2(rgb: Tuple[int,int,int], tol: int = 10) -> bool:
     return abs(r-0xF2)<=tol and abs(g-0xF2)<=tol and abs(b-0xF2)<=tol
 
 def _pct(val: Optional[str]) -> float:
+    """DrawingML: 0..100000."""
     try:
         return max(0.0, min(1.0, int(val)/100000.0))
     except Exception:
@@ -267,22 +276,17 @@ def _apply_lum(base_rgb: Tuple[int,int,int], lumMod: Optional[str], lumOff: Opti
         return max(0, min(255, v))
     return (f(r), f(g), f(b))
 
-def _resolve_fill_color_any(holder: ET.Element, theme_colors: Dict[str,str]) -> Optional[Tuple[int,int,int]]:
-    """
-    Cherche la couleur de remplissage dans a:spPr ou wps:spPr,
-    avec solidFill, pattFill (fgClr), schemeClr (+lum*), etc.
-    """
-    spPr = holder.find(".//a:spPr", NS) or holder.find(".//wps:spPr", NS)
+def _resolve_solid_fill_color(spPr: ET.Element, theme_colors: Dict[str,str]) -> Optional[Tuple[int,int,int]]:
+    """Retourne la couleur RGB du remplissage si détectable."""
     if spPr is None:
         return None
-
-    # solidFill direct
-    srgb = spPr.find(".//a:solidFill/a:srgbClr", NS)
+    solid = spPr.find(".//a:solidFill", NS)
+    if solid is None:
+        return None
+    srgb = solid.find("a:srgbClr", NS)
     if srgb is not None and srgb.get("val"):
         return _hex_to_rgb(srgb.get("val"))
-
-    # schemeClr (+lum*)
-    scheme = spPr.find(".//a:solidFill/a:schemeClr", NS)
+    scheme = solid.find("a:schemeClr", NS)
     if scheme is not None:
         key = (scheme.get("val") or "").lower()
         base_hex = theme_colors.get(key)
@@ -290,21 +294,19 @@ def _resolve_fill_color_any(holder: ET.Element, theme_colors: Dict[str,str]) -> 
         if base_rgb:
             lm = scheme.find("a:lumMod", NS)
             lo = scheme.find("a:lumOff", NS)
-            return _apply_lum(base_rgb, lm.get("val") if lm is not None else None,
-                              lo.get("val") if lo is not None else None)
-
-    # pattern fill (prend fgClr s’il existe)
-    fg = spPr.find(".//a:pattFill/a:fgClr/a:srgbClr", NS)
-    if fg is not None and fg.get("val"):
-        return _hex_to_rgb(fg.get("val"))
-
+            lumMod = lm.get("val") if lm is not None else None
+            lumOff = lo.get("val") if lo is not None else None
+            return _apply_lum(base_rgb, lumMod, lumOff)
+    # parfois Word met a:sysClr -> on peut lire lastClr
+    sysc = solid.find("a:sysClr", NS)
+    if sysc is not None:
+        last = sysc.get("lastClr")
+        return _hex_to_rgb(last)
     return None
 
 def _shape_has_text(holder: ET.Element) -> bool:
-    # txBody (DrawingML) ou wps:txbx (WordprocessingShape)
-    if get_tx_text(holder).strip():
-        return True
-    return False
+    txt = get_tx_text(holder)
+    return bool(txt.strip())
 
 # ───────────────────────── Suppression rectangle gris ──────────────
 def extract_theme_colors(parts: Dict[str, bytes]) -> Dict[str, str]:
@@ -330,17 +332,29 @@ def extract_theme_colors(parts: Dict[str, bytes]) -> Dict[str, str]:
                 colors[tag.lower()] = sys.get("lastClr", "").upper()
     return colors
 
+def _style_len_to_cm(style: str, keys: List[str]) -> Optional[float]:
+    """
+    Extrait la première longueur correspondante (pt|cm|in|px) et la convertit en cm.
+    Gère aussi 'margin-left' utilisé par les formes VML.
+    """
+    if not style:
+        return None
+    for k in keys:
+        m = re.search(rf"{k}\s*:\s*([-0-9.]+)\s*(pt|cm|in|px)\b", style)
+        if m:
+            val = float(m.group(1)); unit = m.group(2).lower()
+            if unit == "cm": return val
+            if unit == "pt": return val / 28.3464567
+            if unit == "in": return val * 2.54
+            if unit == "px": return val / 37.795275591
+    return None
+
 def remove_large_grey_rectangles(root: ET.Element, theme_colors: Dict[str, str]):
     """
-    Supprime le grand panneau gris (#F2F2F2) à droite de la couverture,
-    en conservant le plan de gauche.
-    Critères (DML) :
-      • Forme rectangulaire (rect/roundRect), sans image, sans texte
-      • Position X ≥ 10 cm
-      • Taille ≥ 7×12 cm
-      • Couleur ≈ #F2F2F2 (tolérance) SI disponible ;
-        sinon on applique quand même la règle par position+taille (fallback).
-    VML : même logique via style/fillcolor.
+    Supprime uniquement le grand rectangle gris très clair (#F2F2F2 ± tolérance)
+    à droite de la page de garde. Conserve le plan à gauche.
+    - Rectangles DML (rect/roundRect) sans texte, assez grands, à droite.
+    - Rectangles VML : gère styles en cm **et** en pt, et 'margin-left'.
     """
     parent_map = {child: parent for parent in root.iter() for child in parent}
 
@@ -349,50 +363,40 @@ def remove_large_grey_rectangles(root: ET.Element, theme_colors: Dict[str, str])
         holder = drawing.find(".//wp:anchor", NS) or drawing.find(".//wp:inline", NS)
         if holder is None:
             continue
-
-        # ignorer les images
-        if holder.find(".//pic:pic", NS) is not None:
+        if holder.find(".//pic:pic", NS) is not None:  # images
             continue
 
-        # géométrie rectangulaire ?
-        is_rect = holder.find(".//a:prstGeom[@prst='rect']", NS) is not None or \
-                  holder.find(".//a:prstGeom[@prst='roundRect']", NS) is not None
-        if not is_rect:
-            continue
-
-        # texte ? si oui => ne pas supprimer (plan etc.)
-        if _shape_has_text(holder):
-            continue
-
-        # dimension
         extent = holder.find("wp:extent", NS)
         if extent is None:
             continue
         try:
-            cx = int(extent.get("cx", "0")); cy = int(extent.get("cy", "0"))
+            cx = int(extent.get("cx", "0"))
+            cy = int(extent.get("cy", "0"))
         except Exception:
             continue
         width_cm  = emu_to_cm(cx)
         height_cm = emu_to_cm(cy)
 
-        # position horizontale
         x_el = holder.find(".//wp:positionH/wp:posOffset", NS)
         try:
             x_cm = emu_to_cm(int(x_el.text)) if x_el is not None else 0.0
         except Exception:
             x_cm = 0.0
 
-        on_right   = x_cm >= 10.0
-        big_enough = (width_cm >= 7.0 and height_cm >= 12.0)
-
-        if not (on_right and big_enough):
+        is_rect = holder.find(".//a:prstGeom[@prst='rect']", NS) is not None or \
+                  holder.find(".//a:prstGeom[@prst='roundRect']", NS) is not None
+        if not is_rect:
+            continue
+        if _shape_has_text(holder):  # ne pas toucher au plan
             continue
 
-        # couleur (si détectable)
-        rgb = _resolve_fill_color_any(holder, theme_colors)
+        spPr = holder.find(".//a:spPr", NS) or holder.find(".//wps:spPr", NS)
+        rgb = _resolve_solid_fill_color(spPr, theme_colors)
         looks_gray = (rgb is not None and _near_gray_f2(rgb, tol=10))
+        on_right   = x_cm >= 9.0
+        big_enough = (width_cm >= 7.0 and height_cm >= 12.0)
 
-        if looks_gray or rgb is None:  # OK si  gris, ou si couleur non lisible (fallback position+taille)
+        if looks_gray and on_right and big_enough:
             parent = parent_map.get(drawing)
             if parent is not None:
                 parent.remove(drawing)
@@ -401,27 +405,42 @@ def remove_large_grey_rectangles(root: ET.Element, theme_colors: Dict[str, str])
     for pict in root.findall(".//w:pict", NS):
         for tag in ("rect", "roundrect", "shape"):
             for shape in pict.findall(f".//v:{tag}", NS):
-                # dimensions/position
-                style = (shape.get("style") or "")
-                m_w = re.search(r"width:([0-9.]+)cm", style)
-                m_h = re.search(r"height:([0-9.]+)cm", style)
-                m_l = re.search(r"left:([0-9.]+)cm", style)
-                if not (m_w and m_h):
+                # Couleur de remplissage (attribut ou v:fill)
+                color_hex = None
+                fill_attr = shape.get("fillcolor") or ""
+                m = re.search(r"#?([0-9A-Fa-f]{6})", fill_attr)
+                if m:
+                    color_hex = m.group(1).upper()
+                if not color_hex:
+                    vfill = shape.find("v:fill", NS)
+                    if vfill is not None:
+                        col = vfill.get("color") or vfill.get("color2")
+                        if col:
+                            m2 = re.search(r"#?([0-9A-Fa-f]{6})", col)
+                            if m2:
+                                color_hex = m2.group(1).upper()
+                rgb = _hex_to_rgb(color_hex) if color_hex else None
+                if rgb is None or not _near_gray_f2(rgb, tol=10):
                     continue
-                w = float(m_w.group(1)); h = float(m_h.group(1))
-                left_cm = float(m_l.group(1)) if m_l else 0.0
 
-                # texte ?
-                has_txbx = shape.find(".//w:txbxContent", NS) is not None
-                if has_txbx:
+                # Texte ? Si oui on ne touche pas
+                has_text = any((t.text or "").strip() for t in shape.findall(".//w:t", NS))
+                if has_text:
                     continue
 
-                # couleur (si présente)
-                fill_attr = (shape.get("fillcolor") or "").lstrip("#")
-                rgb = _hex_to_rgb(fill_attr)
-                looks_gray = (rgb is not None and _near_gray_f2(rgb, tol=10))
+                style = shape.get("style", "")
+                w_cm = _style_len_to_cm(style, ["width"])
+                h_cm = _style_len_to_cm(style, ["height"])
+                left_cm = _style_len_to_cm(style, ["left", "margin-left"]) or 0.0
 
-                if (left_cm >= 10.0 and w >= 7.0 and h >= 12.0) and (looks_gray or rgb is None):
+                if not (w_cm and h_cm):
+                    continue
+
+                on_right   = left_cm >= 9.0
+                big_enough = (w_cm >= 7.0 and h_cm >= 12.0)
+
+                if on_right and big_enough:
+                    # la forme est seule dans son w:pict -> on supprime w:pict
                     parent = parent_map.get(pict)
                     if parent is not None:
                         parent.remove(pict)
@@ -435,16 +454,9 @@ def build_anchored_image(rId, width_cm, height_cm, left_cm, top_cm, name="Legend
         drawing,
         f"{{{WP}}}anchor",
         {
-            "distT": "0",
-            "distB": "0",
-            "distL": "0",
-            "distR": "0",
-            "simplePos": "0",
-            "relativeHeight": "0",
-            "behindDoc": "0",
-            "locked": "0",
-            "layoutInCell": "1",
-            "allowOverlap": "1",
+            "distT": "0", "distB": "0", "distL": "0", "distR": "0",
+            "simplePos": "0", "relativeHeight": "0", "behindDoc": "0",
+            "locked": "0", "layoutInCell": "1", "allowOverlap": "1",
         },
     )
     ET.SubElement(anchor, f"{{{WP}}}simplePos", {"x": "0", "y": "0"})
@@ -501,7 +513,7 @@ def insert_legend_image(
     top_cm=23.8,
     width_cm=5.68,
     height_cm=3.77,
-) -> Tuple[bytes, bytes, Tuple[str, bytes]]:
+):
     root = ET.fromstring(document_xml)
     rels = ET.fromstring(rels_xml)
     paras = root.findall(".//w:p", NS)
@@ -565,7 +577,6 @@ def reposition_small_icon(root, left_cm=15.3, top_cm=11.0):
         return
     chosen = max(cand, key=lambda t: t[0])
     anchor = chosen[2]
-
     posH = anchor.find("wp:positionH", NS) or ET.SubElement(anchor, f"{{{WP}}}positionH")
     for ch in list(posH):
         posH.remove(ch)
@@ -632,6 +643,7 @@ def process_bytes(
 
         parts[name] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
+    # Légende optionnelle
     if legend_bytes and "word/document.xml" in parts and "word/_rels/document.xml.rels" in parts:
         parts["word/document.xml"] = remove_legend_text(parts["word/document.xml"])
         new_doc, new_rels, media = insert_legend_image(
