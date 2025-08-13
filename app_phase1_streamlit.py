@@ -9,9 +9,9 @@ A  = "http://schemas.openxmlformats.org/drawingml/2006/main"
 PIC= "http://schemas.openxmlformats.org/drawingml/2006/picture"
 R  = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 P_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
-VML_NS = "urn:schemas-microsoft-com:vml"              # <— ajouté pour VML
+VML_NS = "urn:schemas-microsoft-com:vml"  # pour VML (ne change rien au rendu)
 
-NS = {"w":W, "wp":WP, "a":A, "pic":PIC, "r":R, "v":VML_NS}   # <— 'v' ajouté
+NS = {"w":W, "wp":WP, "a":A, "pic":PIC, "r":R, "v":VML_NS}
 for k,v in NS.items(): ET.register_namespace(k, v)
 
 TARGETS = ["2024-2025","2024 - 2025","2024\u00A0-\u00A02025"]
@@ -71,6 +71,12 @@ def replace_years(root):
         for tgt in TARGETS: new = new.replace(tgt, REPL)
         if new != txt: redistribute(ats, new)
 
+def strip_actualisation_everywhere(root):
+    # supprime “ACTUALISATION” dans tous les w:t et a:t (respecte la casse/accents)
+    for t in root.findall(".//w:t", NS) + root.findall(".//a:t", NS):
+        if t.text:
+            t.text = re.sub(r"(?i)\bactualisation\b", "", t.text)
+
 def force_calibri(root):
     for r in root.findall(".//w:r", NS): set_run_props(r, calibri=True)
 
@@ -89,6 +95,7 @@ def cover_sizes_cleanup(root):
         if "université" in low and (any(x.replace("\u00A0"," ") in txt.replace("\u00A0"," ") for x in TARGETS+[REPL])): set_size(paras[i], 10)  # vert
         if "introduction" in low and "biologie" in low: set_size(paras[i], 20)  # jaune
         if txt.strip().upper() == "ACTUALISATION":
+            # garde l’alignement et le style mais vide le texte
             for t in paras[i].findall(".//w:t", NS):
                 if t.text: t.text = re.sub(r"(?i)ACTUALISATION","",t.text)
         if txt.strip().upper() == "PLAN": set_size(paras[i], 11)
@@ -109,7 +116,7 @@ def tables_and_numbering(root):
             for r in p.findall(".//w:r", NS):
                 set_run_props(r, size=10, bold=True, italic=True, color="FFFFFF")
 
-# ---------- Grey cover rectangle removal (upgraded) ----------
+# ---------- Grey cover rectangle removal (robuste, sans toucher aux footers) ----------
 def build_parent_map(root): return {child: parent for parent in root.iter() for child in parent}
 def hex_to_rgb(h): h=h.strip().lstrip("#"); return (int(h[0:2],16),int(h[2:4],16),int(h[4:6],16)) if len(h)==6 else (0,0,0)
 def is_close_grey(val, target="#F2F2F2", tol=16):
@@ -118,20 +125,11 @@ def is_close_grey(val, target="#F2F2F2", tol=16):
         return abs(r-rt)<=tol and abs(g-gt)<=tol and abs(b-bt)<=tol
     except: return False
 
-def looks_like_cover_shape(holder):
-    posV = holder.find("wp:positionV/wp:posOffset", NS)
-    if posV is None: return True
-    try:  return emu_to_cm(int(posV.text)) < 20.0
-    except: return True
-
 def extract_theme_colors(parts: Dict[str, bytes]) -> Dict[str, str]:
-    """Mappe les schemeClr du thème vers des sRGB (lastClr)."""
     data = parts.get("word/theme/theme1.xml")
     if not data: return {}
-    try:
-        root = ET.fromstring(data)
-    except ET.ParseError:
-        return {}
+    try: root = ET.fromstring(data)
+    except ET.ParseError: return {}
     colors = {}
     cs = root.find(".//a:clrScheme", NS)
     if cs is None: return colors
@@ -146,16 +144,16 @@ def extract_theme_colors(parts: Dict[str, bytes]) -> Dict[str, str]:
                 colors[tag.lower()] = sys.get("lastClr", "").upper()
     return colors
 
+def looks_like_cover_shape(holder):
+    posV = holder.find("wp:positionV/wp:posOffset", NS)
+    if posV is None: return True
+    try:  return emu_to_cm(int(posV.text)) < 20.0
+    except: return True
+
 def remove_large_grey_rectangles(root, theme_colors: Dict[str, str]):
-    """
-    Supprime les grands rectangles gris (#F2F2F2 ± tolérance) :
-    - tient compte des couleurs de thème + luminance
-    - gère DrawingML (anchor/inline) et VML (anciennes formes)
-    - limite aux formes rect/roundRect, grosses, et en haut de page (couverture)
-    """
     parent_map = build_parent_map(root)
 
-    # --- DrawingML ---
+    # DrawingML
     for drawing in root.findall(".//w:drawing", NS):
         holder = drawing.find(".//wp:anchor", NS) or drawing.find(".//wp:inline", NS)
         if holder is None: continue
@@ -167,7 +165,7 @@ def remove_large_grey_rectangles(root, theme_colors: Dict[str, str]):
 
         has_pic = holder.find(".//pic:pic", NS) is not None
 
-        # couleurs réelles + dérivées du thème (avec lumMod/lumOff appliqués)
+        # couleurs (srgb + scheme transformées via lumMod/lumOff)
         srgb = [el.get("val","").upper() for el in holder.findall(".//a:srgbClr", NS)]
         for sc in holder.findall(".//a:schemeClr", NS):
             base = theme_colors.get(sc.get("val","").lower())
@@ -192,14 +190,14 @@ def remove_large_grey_rectangles(root, theme_colors: Dict[str, str]):
             parent = parent_map.get(drawing)
             if parent is not None: parent.remove(drawing)
 
-    # --- VML (zones héritées) ---
+    # VML (hérité)
     for pict in root.findall(".//w:pict", NS):
         for tag in ("rect","roundrect","shape"):
             for shape in pict.findall(f".//v:{tag}", NS):
                 fill = (shape.get("fillcolor","") or "").upper()
-                if not is_close_grey(fill, "#F2F2F2", 16):
+                if not is_close_grey(fill, "#F2F2F2", 16):  # ne cible que le gris clair
                     continue
-                style = shape.get("style", "")
+                style = shape.get("style","")
                 m_w = re.search(r"width:([0-9.]+)cm", style)
                 m_h = re.search(r"height:([0-9.]+)cm", style)
                 if m_w and m_h:
@@ -288,21 +286,43 @@ def insert_legend_image(document_xml: bytes, rels_xml: bytes, image_bytes: bytes
             ET.tostring(rels, encoding="utf-8", xml_declaration=True),
             (f"word/{media_name}", image_bytes))
 
-# ---------- Icon reposition ----------
+# ---------- Icon reposition (détection plus sûre) ----------
 def reposition_small_icon(root, left_cm=15.3, top_cm=11.0):
+    # on cible le petit pictogramme (<=3 cm) le plus à droite dans la moitié supérieure
+    cand = []
     for anchor in root.findall(".//wp:anchor", NS):
         extent = anchor.find("wp:extent", NS)
         if extent is None: continue
-        try: cx = int(extent.get("cx","0")); cy = int(extent.get("cy","0"))
-        except: continue
-        if anchor.find(".//pic:pic", NS) is not None and cx <= cm_to_emu(3.0) and cy <= cm_to_emu(3.0):
-            posH = anchor.find("wp:positionH", NS) or ET.SubElement(anchor, f"{{{WP}}}positionH")
-            for ch in list(posH): posH.remove(ch)
-            posH.set("relativeFrom","page"); ET.SubElement(posH, f"{{{WP}}}posOffset").text = str(cm_to_emu(left_cm))
-            posV = anchor.find("wp:positionV", NS) or ET.SubElement(anchor, f"{{{WP}}}positionV")
-            for ch in list(posV): posV.remove(ch)
-            posV.set("relativeFrom","page"); ET.SubElement(posV, f"{{{WP}}}posOffset").text = str(cm_to_emu(top_cm))
-            break
+        try:
+            cx = int(extent.get("cx","0")); cy = int(extent.get("cy","0"))
+        except: 
+            continue
+        if anchor.find(".//pic:pic", NS) is None: 
+            continue
+        if cx > cm_to_emu(3.0) or cy > cm_to_emu(3.0):
+            continue
+        # lire position actuelle (0 par défaut)
+        x = anchor.findtext("wp:positionH/wp:posOffset", default="0", namespaces=NS)
+        y = anchor.findtext("wp:positionV/wp:posOffset", default="0", namespaces=NS)
+        try:
+            x_cm = emu_to_cm(int(x)); y_cm = emu_to_cm(int(y))
+        except:
+            x_cm, y_cm = 0.0, 0.0
+        cand.append((x_cm, y_cm, anchor))
+    if not cand: 
+        return
+    # prioriser ceux déjà dans la zone (6–16 cm en hauteur, le plus à droite)
+    zone = [c for c in cand if 6.0 <= c[1] <= 16.0]
+    chosen = max(zone or cand, key=lambda t: t[0])  # plus à droite
+    anchor = chosen[2]
+
+    # (re)positionner
+    posH = anchor.find("wp:positionH", NS) or ET.SubElement(anchor, f"{{{WP}}}positionH")
+    for ch in list(posH): posH.remove(ch)
+    posH.set("relativeFrom","page"); ET.SubElement(posH, f"{{{WP}}}posOffset").text = str(cm_to_emu(left_cm))
+    posV = anchor.find("wp:positionV", NS) or ET.SubElement(anchor, f"{{{WP}}}positionV")
+    for ch in list(posV): posV.remove(ch)
+    posV.set("relativeFrom","page"); ET.SubElement(posV, f"{{{WP}}}posOffset").text = str(cm_to_emu(top_cm))
 
 # ---------- Footer normalization (10pt) ----------
 def set_dml_text_size(root, pt: float):
@@ -321,6 +341,9 @@ def tune_cover_dml_textsizes(root):
     for holder in root.findall(".//wp:anchor", NS) + root.findall(".//wp:inline", NS):
         tx = holder.find(".//a:txBody", NS)
         if tx is None: continue
+        # suppression d'ACTUALISATION à la source (formes)
+        for t in tx.findall(".//a:t", NS):
+            if t.text: t.text = re.sub(r"(?i)\bactualisation\b", "", t.text)
         text = "".join(t.text or "" for t in tx.findall(".//a:t", NS)).strip().lower()
         if not text: continue
         if ("universite" in text) or ("université" in text):
@@ -340,7 +363,6 @@ def process_bytes(docx_bytes: bytes,
     with zipfile.ZipFile(io.BytesIO(docx_bytes), "r") as zin:
         parts: Dict[str, bytes] = {n: zin.read(n) for n in zin.namelist()}
 
-    # couleurs de thème pour la détection du gris
     theme_colors = extract_theme_colors(parts)
 
     for name, data in list(parts.items()):
@@ -349,6 +371,7 @@ def process_bytes(docx_bytes: bytes,
         except ET.ParseError: continue
 
         replace_years(root)
+        strip_actualisation_everywhere(root)   # <-- enlève ACTUALISATION partout sans casser le style
         force_calibri(root)
         red_to_black(root)
 
@@ -357,10 +380,10 @@ def process_bytes(docx_bytes: bytes,
             tune_cover_dml_textsizes(root)      # formes DML
             tables_and_numbering(root)
             reposition_small_icon(root, icon_left, icon_top)
-            remove_large_grey_rectangles(root, theme_colors)   # <— passe le thème
+            remove_large_grey_rectangles(root, theme_colors)  # supprime uniquement le grand rectangle gris
 
         if name.startswith("word/footer"):
-            force_footer_size_10(root)
+            force_footer_size_10(root)          # taille 10 dans le pied de page (texte + DML)
 
         parts[name] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
@@ -395,12 +418,12 @@ with st.sidebar:
 
 st.markdown("**1) Glisse/dépose un ou plusieurs fichiers `.docx`**")
 files = st.file_uploader("DOCX à traiter", type=["docx"], accept_multiple_files=True)
-st.markdown("**2) Ajoute l’image de la Légende (PNG/JPG)**")
+st.markdown("**2) (Optionnel) Ajoute l’image de la Légende (PNG/JPG)**")
 legend_file = st.file_uploader("Image Légendes", type=["png","jpg","jpeg","webp"], accept_multiple_files=False)
 
 if st.button("⚙️ Lancer le traitement", type="primary", disabled=not files):
     if not files:
-        st.warning("Ajoute au moins un fichier .docx")
+        st.warning("Ajoute au moins un .docx")
     else:
         legend_bytes = legend_file.read() if legend_file else None
         for up in files:
