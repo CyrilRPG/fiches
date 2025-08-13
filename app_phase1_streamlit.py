@@ -289,14 +289,28 @@ def extract_theme_colors(parts: Dict[str, bytes]) -> Dict[str, str]:
                 colors[tag.lower()] = sys.get("lastClr", "").upper()
     return colors
 
+def hex_to_rgb(h):
+    h = h.strip().lstrip("#")
+    return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)) if len(h) == 6 else (0, 0, 0)
+
+def is_close_grey(val, target="#F2F2F2", tol=16):
+    try:
+        r, g, b = hex_to_rgb(val)
+        rt, gt, bt = hex_to_rgb(target)
+        return abs(r - rt) <= tol and abs(g - gt) <= tol and abs(b - bt) <= tol
+    except Exception:
+        return False
+
 def remove_large_grey_rectangles(root: ET.Element, theme_colors: Dict[str, str]):
     """
-    Supprime uniquement le grand rectangle gris clair situé sur la moitié droite de la couverture
-    ou les très grandes formes (≥ 10×12 cm) n’importe où. Les formes à gauche (plan) sont conservées.
+    Supprime les grands rectangles gris clair de la page de garde.
+    Les rectangles sont détectés via srgbClr et schemeClr (avec lumMod/lumOff).
+    On supprime s’ils sont gris clair et couvrent une grande zone (≥ 6×8 cm) ou la moitié droite,
+    ou bien s’ils sont extrêmement grands (≥ 10×12 cm) quel que soit l’emplacement.
     """
     parent_map = {child: parent for parent in root.iter() for child in parent}
 
-    # DML (DrawingML)
+    # Traitement des formes DrawingML
     for drawing in root.findall(".//w:drawing", NS):
         holder = drawing.find(".//wp:anchor", NS) or drawing.find(".//wp:inline", NS)
         if holder is None:
@@ -310,9 +324,11 @@ def remove_large_grey_rectangles(root: ET.Element, theme_colors: Dict[str, str])
         except Exception:
             continue
 
+        # On ne supprime pas les formes contenant une image
         if holder.find(".//pic:pic", NS) is not None:
             continue
 
+        # Position en cm
         x_el = holder.find(".//wp:positionH/wp:posOffset", NS)
         y_el = holder.find(".//wp:positionV/wp:posOffset", NS)
         try:
@@ -321,40 +337,57 @@ def remove_large_grey_rectangles(root: ET.Element, theme_colors: Dict[str, str])
         except Exception:
             x_cm = y_cm = 0.0
 
+        # Type géométrique : rect ou roundRect
         is_rect = holder.find(".//a:prstGeom[@prst='rect']", NS) is not None or \
                   holder.find(".//a:prstGeom[@prst='roundRect']", NS) is not None
         if not is_rect:
             continue
 
-        srgb_colors = [el.get("val", "").upper() for el in holder.findall(".//a:srgbClr", NS)]
-        looks_f2 = False
-        for v in srgb_colors:
-            try:
-                r, g, b = int(v[0:2], 16), int(v[2:4], 16), int(v[4:6], 16)
-                if abs(r - 0xF2) <= 16 and abs(g - 0xF2) <= 16 and abs(b - 0xF2) <= 16:
-                    looks_f2 = True
-                    break
-            except Exception:
-                pass
+        # Récupération de toutes les couleurs explicites srgbClr et schemeClr avec correction lumMod/lumOff
+        srgb_list = []
+        # couleurs directes
+        for el in holder.findall(".//a:srgbClr", NS):
+            val = el.get("val", "").upper()
+            if val:
+                srgb_list.append(val)
+        # couleurs de thème avec lumMod/lumOff
+        for sc in holder.findall(".//a:schemeClr", NS):
+            key = sc.get("val", "").lower()
+            base = theme_colors.get(key)
+            if not base:
+                continue
+            # couleur de base
+            r, g, b = hex_to_rgb(base)
+            # corrections lumMod / lumOff
+            lm = sc.find("a:lumMod", NS)
+            lo = sc.find("a:lumOff", NS)
+            mod = int(lm.get("val", "100000")) / 100000 if lm is not None else 1.0
+            off = int(lo.get("val", "0")) / 100000 if lo is not None else 0.0
+            r = min(255, int(r * mod + 255 * off))
+            g = min(255, int(g * mod + 255 * off))
+            b = min(255, int(b * mod + 255 * off))
+            srgb_list.append(f"{r:02X}{g:02X}{b:02X}")
 
+        # Détermine si la forme est gris clair
+        looks_f2 = any(is_close_grey(v, "#F2F2F2", 16) for v in srgb_list)
+
+        # Dimensions en cm
         width_cm = emu_to_cm(cx)
         height_cm = emu_to_cm(cy)
-        on_right = x_cm >= 9.0  # moitié droite de la page
+        big_on_cover = y_cm < 20.0 and width_cm >= 6.0 and height_cm >= 8.0
         very_big_anywhere = width_cm >= 10.0 and height_cm >= 12.0
+        right_half = x_cm >= 9.0  # moitié droite
 
-        # On supprime si :
-        # - la couleur explicite est gris clair ET la forme est assez grande ET positionnée à droite
-        # - ou bien la forme est extrêmement grande n’importe où
-        if ((srgb_colors and looks_f2 and on_right and width_cm >= 6.0 and height_cm >= 8.0) or
-            very_big_anywhere):
+        if (looks_f2 and (big_on_cover or right_half)) or very_big_anywhere:
             parent = parent_map.get(drawing)
             if parent is not None:
                 parent.remove(drawing)
 
-    # VML (formes héritées)
+    # Traitement des VML shapes
     for pict in root.findall(".//w:pict", NS):
         for tag in ("rect", "roundrect", "shape"):
             for shape in pict.findall(f".//v:{tag}", NS):
+                # Couleur de remplissage
                 fill = (shape.get("fillcolor", "") or "").upper()
                 style = shape.get("style", "")
                 m_w = re.search(r"width:([0-9.]+)cm", style)
@@ -362,19 +395,22 @@ def remove_large_grey_rectangles(root: ET.Element, theme_colors: Dict[str, str])
                 m_l = re.search(r"left:([0-9.]+)cm", style)
                 if not (m_w and m_h):
                     continue
-                w = float(m_w.group(1))
-                h = float(m_h.group(1))
-                left_cm = float(m_l.group(1)) if m_l else 0.0
-                on_right = left_cm >= 9.0
-                very_big_anywhere = (w >= 10 and h >= 12)
-                # teste la couleur gris clair
                 try:
-                    looks_f2 = abs(int(fill[0:2], 16) - 0xF2) <= 16 and \
-                               abs(int(fill[2:4], 16) - 0xF2) <= 16 and \
-                               abs(int(fill[4:6], 16) - 0xF2) <= 16
-                except Exception:
-                    looks_f2 = False
-                if ((looks_f2 and on_right and w >= 6 and h >= 8) or very_big_anywhere):
+                    w = float(m_w.group(1))
+                    h = float(m_h.group(1))
+                except:
+                    continue
+                left_cm = float(m_l.group(1)) if m_l else 0.0
+                right_half = left_cm >= 9.0
+                big_on_cover = (w >= 6 and h >= 8)
+                very_big_anywhere = (w >= 10 and h >= 12)
+                # Détection du gris clair via fillcolor
+                looks_f2 = False
+                try:
+                    looks_f2 = is_close_grey(fill, "#F2F2F2", 18)
+                except:
+                    pass
+                if (looks_f2 and (big_on_cover or right_half)) or very_big_anywhere:
                     parent = parent_map.get(pict)
                     if parent is not None:
                         parent.remove(pict)
