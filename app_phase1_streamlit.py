@@ -112,24 +112,17 @@ def force_calibri(root):
     for r in root.findall(".//w:r", NS):
         set_run_props(r, calibri=True)
 
-# 🔧 ─────────────────────── SEULE CHOSE MODIFIÉE ───────────────────────
+# ── recoloration texte rouge/bleu → noir (inchangé vs version précédente)
 def red_to_black(root):
-    """
-    Met en noir les runs dont la couleur est un rouge/bleu "classique Word"
-    (liste élargie + détection par tolérance), ainsi que les liens (hyperlink/followedHyperlink).
-    Ne touche à rien d’autre.
-    """
     RED_HEX = {
         "FF0000","C00000","CC0000","E60000","ED1C24","F44336","DC143C","B22222","E74C3C","D0021B"
     }
     BLUE_HEX = {
         "0000FF","0070C0","2E74B5","1F497D","2F5496","4F81BD","5B9BD5","1F4E79","0F4C81","1E90FF","3399FF","3C78D8"
     }
-
     def looks_red(rgb: Tuple[int,int,int]) -> bool:
         r,g,b = rgb
         return (r >= 170 and g <= 110 and b <= 110)
-
     def looks_blue(rgb: Tuple[int,int,int]) -> bool:
         r,g,b = rgb
         return (b >= 170 and r <= 110 and g <= 140)
@@ -141,32 +134,50 @@ def red_to_black(root):
         c = rPr.find("w:color", NS)
         if c is None:
             continue
-
         val = (c.get(f"{{{W}}}val") or "").strip().upper()
         theme = (c.get(f"{{{W}}}themeColor") or "").strip().lower()
-
         make_black = False
-
-        # 1) Thèmes typiquement bleus (liens)
         if theme in {"hyperlink", "followedHyperlink"}:
             make_black = True
-
-        # 2) Hex explicite
         if not make_black and re.fullmatch(r"[0-9A-F]{6}", val or ""):
             if val in RED_HEX or val in BLUE_HEX:
                 make_black = True
             else:
-                # 3) Heuristique proche rouge/bleu
                 rgb = _hex_to_rgb(val)
-                if rgb:
-                    if looks_red(rgb) or looks_blue(rgb):
-                        make_black = True
-
+                if rgb and (looks_red(rgb) or looks_blue(rgb)):
+                    make_black = True
         if make_black:
             c.set(f"{{{W}}}val", "000000")
-            # nettoyer tout héritage de thème qui pourrait réappliquer une teinte
             for a in ("themeColor", "themeTint", "themeShade"):
                 c.attrib.pop(f"{{{W}}}{a}", None)
+
+# ── NOUVEAU : puces rouges → noires dans numbering.xml
+def force_red_bullets_black_in_numbering(root):
+    """
+    Met en noir les couleurs des symboles de liste définies dans word/numbering.xml
+    (w:lvl/w:rPr/w:color) si elles sont rouges.
+    """
+    RED_HEX = {"FF0000","C00000","CC0000","E60000","ED1C24","F44336","DC143C","B22222","E74C3C","D0021B"}
+    def looks_red(rgb: Tuple[int,int,int]) -> bool:
+        if not rgb: return False
+        r,g,b = rgb
+        return (r >= 170 and g <= 110 and b <= 110)
+
+    for col in root.findall(".//w:lvl//w:rPr/w:color", NS):
+        val = (col.get(f"{{{W}}}val") or "").strip().upper()
+        make_black = False
+        if re.fullmatch(r"[0-9A-F]{6}", val or ""):
+            if val in RED_HEX:
+                make_black = True
+            else:
+                rgb = _hex_to_rgb(val)
+                if rgb and looks_red(rgb):
+                    make_black = True
+        # Si la couleur n'est pas fixée (ex: themeColor), on ne touche pas.
+        if make_black:
+            col.set(f"{{{W}}}val", "000000")
+            for a in ("themeColor","themeTint","themeShade"):
+                col.attrib.pop(f"{{{W}}}{a}", None)
 
 # ───────────────────────── Helpers couvertures (formes) ────────────
 def holder_pos_cm(holder) -> Tuple[float, float]:
@@ -199,21 +210,17 @@ def set_tx_size(holder, pt: float):
 def cover_sizes_cleanup(root):
     paras = root.findall(".//w:p", NS)
     texts = [get_text(p).strip() for p in paras]
-
     def set_size(p, pt):
         for r in p.findall(".//w:r", NS):
             set_run_props(r, size=pt)
-
     last_was_fiche = False
     for i, txt in enumerate(texts):
         low = txt.lower()
-
         if txt.strip().upper() in ("ACTUALISATION", "NOUVELLE FICHE"):
             for t in paras[i].findall(".//w:t", NS):
                 if t.text:
                     t.text = re.sub(r"(?iu)\b(actualisation|nouvelle\s+fiche)\b", "", t.text)
             continue
-
         if "fiche de cours" in low:
             set_size(paras[i], 22)
             last_was_fiche = True
@@ -221,7 +228,6 @@ def cover_sizes_cleanup(root):
         if last_was_fiche and txt:
             set_size(paras[i], 20)
             last_was_fiche = False
-
         if "université" in low and any(
             x.replace("\u00A0", " ") in txt.replace("\u00A0", " ") for x in TARGETS + [REPL]
         ):
@@ -236,21 +242,15 @@ def tune_cover_shapes_spatial(root):
             continue
         x, y = holder_pos_cm(holder)
         holders.append((y, x, holder, txt))
-
     if not holders:
         return
-
     holders.sort(key=lambda t: (t[0], t[1]))
-
-    # université + année en 10
     for _, _, h, txt in holders:
         low = txt.lower()
         if ("universite" in low or "université" in low) and any(
             t.replace("\u00A0", " ") in txt.replace("\u00A0", " ") for t in TARGETS + [REPL]
         ):
             set_tx_size(h, 10.0)
-
-    # « Fiche de cours … » et la forme suivante
     idx_fiche = None
     for i, (_, _, h, txt) in enumerate(holders):
         if "fiche de cours" in txt.lower():
@@ -263,8 +263,6 @@ def tune_cover_shapes_spatial(root):
             if txt_next and "fiche de cours" not in txt_next.lower():
                 set_tx_size(holders[j][2], 20.0)
                 break
-
-    # nettoyage des mentions dans les formes
     for _, _, h, _ in holders:
         tx = h.find(".//a:txBody", NS)
         if tx is not None:
@@ -317,14 +315,8 @@ def _apply_lum(base_rgb: Tuple[int,int,int], lumMod: Optional[str], lumOff: Opti
     return (f(r), f(g), f(b))
 
 def _resolve_solid_fill_color(spPr: ET.Element, theme_colors: Dict[str,str]) -> Optional[Tuple[int,int,int]]:
-    """
-    Retourne la couleur RGB du remplissage (si détectable) à partir de a:solidFill
-    contenu dans a:spPr ou wps:spPr. Gère srgbClr, schemeClr et sysClr (+lumMod/lumOff).
-    """
     if spPr is None:
         return None
-
-    # a:solidFill où qu'il soit sous spPr
     solid = None
     for el in spPr.iter():
         if el.tag == f"{{{A}}}solidFill":
@@ -332,36 +324,27 @@ def _resolve_solid_fill_color(spPr: ET.Element, theme_colors: Dict[str,str]) -> 
             break
     if solid is None:
         return None
-
-    # RGB direct
     srgb = solid.find("a:srgbClr", NS)
     if srgb is not None and srgb.get("val"):
         rgb = _hex_to_rgb(srgb.get("val"))
-        lm = srgb.find("a:lumMod", NS)
-        lo = srgb.find("a:lumOff", NS)
+        lm = srgb.find("a:lumMod", NS); lo = srgb.find("a:lumOff", NS)
         if rgb and (lm is not None or lo is not None):
             rgb = _apply_lum(rgb, lm.get("val") if lm is not None else None,
                                   lo.get("val") if lo is not None else None)
         return rgb
-
-    # Couleur de thème
     scheme = solid.find("a:schemeClr", NS)
     if scheme is not None:
         base_hex = theme_colors.get((scheme.get("val") or "").lower())
         base_rgb = _hex_to_rgb(base_hex) if base_hex else None
-        lm = scheme.find("a:lumMod", NS)
-        lo = scheme.find("a:lumOff", NS)
+        lm = scheme.find("a:lumMod", NS); lo = scheme.find("a:lumOff", NS)
         if base_rgb:
             return _apply_lum(base_rgb, lm.get("val") if lm is not None else None,
                                          lo.get("val") if lo is not None else None)
-
-    # Couleur système (+ fallback lastClr)
     sysc = solid.find("a:sysClr", NS)
     if sysc is not None:
         base_hex = sysc.get("lastClr") or sysc.get("val")
         base_rgb = _hex_to_rgb(base_hex)
-        lm = sysc.find("a:lumMod", NS)
-        lo = sysc.find("a:lumOff", NS)
+        lm = sysc.find("a:lumMod", NS); lo = sysc.find("a:lumOff", NS)
         if base_rgb:
             return _apply_lum(base_rgb, lm.get("val") if lm is not None else None,
                                          lo.get("val") if lo is not None else None)
@@ -397,72 +380,45 @@ def extract_theme_colors(parts: Dict[str, bytes]) -> Dict[str, str]:
 
 # ───────────────────────── Suppression rectangle gris ──────────────
 def remove_large_grey_rectangles(root: ET.Element, theme_colors: Dict[str, str]):
-    """
-    Supprime uniquement le grand rectangle gris clair (#F2F2F2 ± tolérance) à droite de la couverture.
-    On laisse le plan (formes avec du texte) intact.
-    Critères DML :
-      - wp:anchor/wp:inline sans pic:pic
-      - géométrie rect/roundRect
-      - AUCUN texte
-      - position X ≥ 9 cm
-      - taille ≥ 7 cm × 12 cm
-      - couleur de remplissage ≈ #F2F2F2 (srgbClr | schemeClr | sysClr + lumMod/lumOff)
-    VML : même logique sur base de style/fillcolor.
-    """
     parent_map = {child: parent for parent in root.iter() for child in parent}
-
-    # DML (DrawingML, y compris wps:spPr)
     for drawing in root.findall(".//w:drawing", NS):
         holder = drawing.find(".//wp:anchor", NS) or drawing.find(".//wp:inline", NS)
         if holder is None:
             continue
         if holder.find(".//pic:pic", NS) is not None:
             continue
-
         prst = holder.find(".//a:prstGeom", NS)
         if prst is None or prst.get("prst") not in ("rect", "roundRect"):
             continue
-
         extent = holder.find("wp:extent", NS)
         if extent is None:
             continue
         try:
-            cx = int(extent.get("cx", "0"))
-            cy = int(extent.get("cy", "0"))
+            cx = int(extent.get("cx", "0")); cy = int(extent.get("cy", "0"))
         except Exception:
             continue
-        width_cm  = emu_to_cm(cx)
-        height_cm = emu_to_cm(cy)
-
+        width_cm  = emu_to_cm(cx); height_cm = emu_to_cm(cy)
         x_el = holder.find(".//wp:positionH/wp:posOffset", NS)
         try:
             x_cm = emu_to_cm(int(x_el.text)) if x_el is not None else 0.0
         except Exception:
             x_cm = 0.0
-
         if _shape_has_text(holder):
             continue
-
         spPr = holder.find(".//a:spPr", NS) or holder.find(".//wps:spPr", NS)
         if spPr is None:
             for el in holder.iter():
                 if el.tag.endswith("spPr"):
-                    spPr = el
-                    break
-
+                    spPr = el; break
         rgb = _resolve_solid_fill_color(spPr, theme_colors)
         looks_gray = rgb is not None and \
                      abs(rgb[0]-0xF2) <= 12 and abs(rgb[1]-0xF2) <= 12 and abs(rgb[2]-0xF2) <= 12
-
         on_right   = x_cm >= 9.0
         big_enough = (width_cm >= 7.0 and height_cm >= 12.0)
-
         if looks_gray and on_right and big_enough:
             parent = parent_map.get(drawing)
             if parent is not None:
                 parent.remove(drawing)
-
-    # VML (formes héritées)
     for pict in root.findall(".//w:pict", NS):
         for tag in ("rect", "roundrect", "shape"):
             for shape in pict.findall(f".//v:{tag}", NS):
@@ -474,14 +430,11 @@ def remove_large_grey_rectangles(root: ET.Element, theme_colors: Dict[str, str])
                     continue
                 w = float(m_w.group(1)); h = float(m_h.group(1))
                 left_cm = float(m_l.group(1)) if m_l else 0.0
-
                 fill_attr = (shape.get("fillcolor") or "").lstrip("#")
                 rgb = _hex_to_rgb(fill_attr.upper())
                 looks_gray = rgb is not None and \
                              abs(rgb[0]-0xF2) <= 12 and abs(rgb[1]-0xF2) <= 12 and abs(rgb[2]-0xF2) <= 12
-
                 has_txbx = shape.find(".//w:txbxContent", NS) is not None
-
                 if looks_gray and not has_txbx and left_cm >= 9.0 and w >= 7.0 and h >= 12.0:
                     parent = parent_map.get(pict)
                     if parent is not None:
@@ -496,16 +449,9 @@ def build_anchored_image(rId, width_cm, height_cm, left_cm, top_cm, name="Legend
         drawing,
         f"{{{WP}}}anchor",
         {
-            "distT": "0",
-            "distB": "0",
-            "distL": "0",
-            "distR": "0",
-            "simplePos": "0",
-            "relativeHeight": "0",
-            "behindDoc": "0",
-            "locked": "0",
-            "layoutInCell": "1",
-            "allowOverlap": "1",
+            "distT": "0","distB": "0","distL": "0","distR": "0",
+            "simplePos": "0","relativeHeight": "0","behindDoc": "0",
+            "locked": "0","layoutInCell": "1","allowOverlap": "1",
         },
     )
     ET.SubElement(anchor, f"{{{WP}}}simplePos", {"x": "0", "y": "0"})
@@ -542,12 +488,7 @@ def remove_legend_text(document_xml: bytes) -> bytes:
         if get_text(p).strip().lower() == "légendes":
             for t in p.findall(".//w:t", NS):
                 t.text = ""
-    lines = {
-        "Notion nouvelle cette année",
-        "Notion hors programme",
-        "Notion déjà tombée au concours",
-        "Astuces et méthodes",
-    }
+    lines = {"Notion nouvelle cette année","Notion hors programme","Notion déjà tombée au concours","Astuces et méthodes"}
     for p in root.findall(".//w:p", NS):
         if get_text(p).strip() in lines:
             for t in p.findall(".//w:t", NS):
@@ -555,13 +496,8 @@ def remove_legend_text(document_xml: bytes) -> bytes:
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 def insert_legend_image(
-    document_xml: bytes,
-    rels_xml: bytes,
-    image_bytes: bytes,
-    left_cm=2.3,
-    top_cm=23.8,
-    width_cm=5.68,
-    height_cm=3.77,
+    document_xml: bytes, rels_xml: bytes, image_bytes: bytes,
+    left_cm=2.3, top_cm=23.8, width_cm=5.68, height_cm=3.77,
 ) -> Tuple[bytes, bytes, Tuple[str, bytes]]:
     root = ET.fromstring(document_xml)
     rels = ET.fromstring(rels_xml)
@@ -569,29 +505,22 @@ def insert_legend_image(
     idx = None
     for i, p in enumerate(paras):
         if get_text(p).strip().lower().startswith("légendes"):
-            idx = i
-            break
-    if idx is None and paras:
-        idx = 0
-
+            idx = i; break
+    if idx is None and paras: idx = 0
     nums = []
     for rel in rels.findall(f".//{{{P_REL}}}Relationship"):
         rid = rel.get("Id", "")
         if rid.startswith("rId"):
-            try:
-                nums.append(int(rid[3:]))
-            except Exception:
-                pass
+            try: nums.append(int(rid[3:]))
+            except Exception: pass
     new_rid = f"rId{(max(nums) if nums else 0) + 1}"
     media_name = "media/image_legende.png"
     rel = ET.SubElement(rels, f"{{{P_REL}}}Relationship")
     rel.set("Id", new_rid)
     rel.set("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image")
     rel.set("Target", media_name)
-
     drawing = build_anchored_image(new_rid, width_cm, height_cm, left_cm, top_cm, "Legende")
     (ET.SubElement(paras[idx], f"{{{W}}}r") if idx is not None else ET.SubElement(ET.SubElement(root, f"{{{W}}}p"), f"{{{W}}}r")).append(drawing)
-
     return (
         ET.tostring(root, encoding="utf-8", xml_declaration=True),
         ET.tostring(rels, encoding="utf-8", xml_declaration=True),
@@ -606,8 +535,7 @@ def reposition_small_icon(root, left_cm=15.3, top_cm=11.0):
         if extent is None:
             continue
         try:
-            cx = int(extent.get("cx", "0"))
-            cy = int(extent.get("cy", "0"))
+            cx = int(extent.get("cx", "0")); cy = int(extent.get("cy", "0"))
         except Exception:
             continue
         if anchor.find(".//pic:pic", NS) is None:
@@ -617,8 +545,7 @@ def reposition_small_icon(root, left_cm=15.3, top_cm=11.0):
         x = anchor.findtext("wp:positionH/wp:posOffset", default="0", namespaces=NS)
         y = anchor.findtext("wp:positionV/wp:posOffset", default="0", namespaces=NS)
         try:
-            x_cm = emu_to_cm(int(x))
-            y_cm = emu_to_cm(int(y))
+            x_cm = emu_to_cm(int(x)); y_cm = emu_to_cm(int(y))
         except Exception:
             x_cm, y_cm = 0.0, 0.0
         cand.append((x_cm, y_cm, anchor))
@@ -626,15 +553,12 @@ def reposition_small_icon(root, left_cm=15.3, top_cm=11.0):
         return
     chosen = max(cand, key=lambda t: t[0])
     anchor = chosen[2]
-
     posH = anchor.find("wp:positionH", NS) or ET.SubElement(anchor, f"{{{WP}}}positionH")
-    for ch in list(posH):
-        posH.remove(ch)
+    for ch in list(posH): posH.remove(ch)
     posH.set("relativeFrom", "page")
     ET.SubElement(posH, f"{{{WP}}}posOffset").text = str(cm_to_emu(left_cm))
     posV = anchor.find("wp:positionV", NS) or ET.SubElement(anchor, f"{{{WP}}}positionV")
-    for ch in list(posV):
-        posV.remove(ch)
+    for ch in list(posV): posV.remove(ch)
     posV.set("relativeFrom", "page")
     ET.SubElement(posV, f"{{{WP}}}posOffset").text = str(cm_to_emu(top_cm))
 
@@ -676,10 +600,11 @@ def process_bytes(
         except ET.ParseError:
             continue
 
+        # traitements texte & formats
         replace_years(root)
         strip_actualisation_everywhere(root)
         force_calibri(root)
-        red_to_black(root)  # ← élargi pour couvrir rouge ET bleu
+        red_to_black(root)  # texte rouge/bleu → noir
 
         if name == "word/document.xml":
             cover_sizes_cleanup(root)
@@ -687,6 +612,10 @@ def process_bytes(
             tables_and_numbering(root)
             reposition_small_icon(root, icon_left, icon_top)
             remove_large_grey_rectangles(root, theme_colors)
+
+        # NOUVEAU : puces rouges → noires (définies dans numbering.xml)
+        if name == "word/numbering.xml":
+            force_red_bullets_black_in_numbering(root)
 
         if name.startswith("word/footer"):
             force_footer_size_10(root)
