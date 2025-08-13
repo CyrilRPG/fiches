@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 import io, zipfile, re, os, unicodedata, xml.etree.ElementTree as ET
-from typing import Dict, Tuple
+from typing import Dict, Tuple, List
 import streamlit as st
 
 # ───────────────────────── Espaces de noms ─────────────────────────
@@ -95,13 +95,40 @@ def red_to_black(root):
         rPr = r.find("w:rPr", NS);  c = None if rPr is None else rPr.find("w:color", NS)
         if c is not None and (c.get(f"{{{W}}}val","").upper() == "FF0000"): c.set(f"{{{W}}}val","000000")
 
-# ───────────────────────── Mise en forme de la couverture (paragraphes) ─────
+# ───────────────────────── Helpers couvertures (formes) ────────────
+def holder_pos_cm(holder) -> Tuple[float, float]:
+    """Retourne (x_cm, y_cm) si positionH/V->posOffset, sinon (0,0)."""
+    try:
+        x = int((holder.find("wp:positionH/wp:posOffset", NS) or ET.Element("x")).text or "0")
+        y = int((holder.find("wp:positionV/wp:posOffset", NS) or ET.Element("y")).text or "0")
+        return (emu_to_cm(x), emu_to_cm(y))
+    except:
+        return (0.0, 0.0)
+
+def get_tx_text(holder) -> str:
+    tx = holder.find(".//a:txBody", NS)
+    if tx is not None:
+        return "".join(t.text or "" for t in tx.findall(".//a:t", NS)).strip()
+    txbx = holder.find(".//wps:txbx/w:txbxContent", NS)
+    if txbx is not None:
+        return "".join(t.text or "" for t in txbx.findall(".//w:t", NS)).strip()
+    return ""
+
+def set_tx_size(holder, pt: float):
+    tx = holder.find(".//a:txBody", NS)
+    if tx is not None:
+        set_dml_text_size_in_txbody(tx, pt)
+    txbx = holder.find(".//wps:txbx/w:txbxContent", NS)
+    if txbx is not None:
+        for r in txbx.findall(".//w:r", NS): set_run_props(r, size=pt)
+
+# ───────────────────────── Mise en forme couverture (paragraphes) ─
 def cover_sizes_cleanup(root):
     """
-    - 'Fiche de cours …' = 22 pt ; la ligne de cours suivante non vide = 20 pt
+    - 'Fiche de cours …' = 22 pt ; la ligne suivante non vide = 20 pt
     - 'UNIVERSITÉ … <année>' = 10 pt
-    - PLAN (titre + items jusqu’à arrêt) = 11 pt
-    - supprime visuellement le mot ACTUALISATION s’il reste dans un w:p
+    - PLAN (titre + items) = 11 pt
+    - supprime visuellement ACTUALISATION s’il reste dans un w:p
     """
     paras = root.findall(".//w:p", NS)
     texts = [get_text(p).strip() for p in paras]
@@ -113,36 +140,84 @@ def cover_sizes_cleanup(root):
 
     for i, txt in enumerate(texts):
         low = txt.lower()
-        # Nettoyage ACTUALISATION
+
+        # purge ACTUALISATION
         if txt.strip().upper() == "ACTUALISATION":
             for t in paras[i].findall(".//w:t", NS):
                 if t.text: t.text = re.sub(r"(?iu)actualisation", "", t.text)
             continue
 
-        # Fiche de cours / Nom du cours
         if "fiche de cours" in low:
-            set_size(paras[i], 22)
-            last_was_fiche = True
-            in_plan = False
-            continue
+            set_size(paras[i], 22); last_was_fiche = True; in_plan = False; continue
         if last_was_fiche and txt:
-            set_size(paras[i], 20)   # nom du cours => ligne non vide juste après
-            last_was_fiche = False
+            set_size(paras[i], 20); last_was_fiche = False
 
-        # Encadré université + année (dans du texte normal)
         if "université" in low and any(x.replace("\u00A0"," ") in txt.replace("\u00A0"," ") for x in TARGETS+[REPL]):
             set_size(paras[i], 10)
 
-        # PLAN + tous les items ensuite en 11
         if txt.strip().upper() == "PLAN":
-            set_size(paras[i], 11)
-            in_plan = True
-            continue
+            set_size(paras[i], 11); in_plan = True; continue
         if in_plan:
-            if txt.strip() == "" or low.startswith("légende"):
-                in_plan = False
-            else:
-                set_size(paras[i], 11)
+            if txt.strip()=="" or low.startswith("légende"): in_plan=False
+            else: set_size(paras[i], 11)
+
+# ───────────────────────── Couverture : formes DML/WPS (spatial) ──
+def tune_cover_shapes_spatial(root):
+    """
+    Prend toutes les formes (anchor/inline), lit leur texte et position (x,y),
+    trie par y puis x, puis:
+      - 'Fiche de cours …' => 22 pt
+      - premier texte non vide après => 20 pt (nom du cours)
+      - blocs contenant 'université' et une année => 10 pt
+      - tout bloc contenant 'PLAN' => tout en 11 pt
+    """
+    holders = []
+    for holder in root.findall(".//wp:anchor", NS) + root.findall(".//wp:inline", NS):
+        txt = get_tx_text(holder)
+        if not txt: continue
+        x, y = holder_pos_cm(holder)
+        holders.append((y, x, holder, txt))
+
+    if not holders:
+        return
+
+    holders.sort(key=lambda t: (t[0], t[1]))  # y, puis x
+
+    # université + année en 10
+    for _,_,h,txt in holders:
+        low = txt.lower()
+        if ("universite" in low or "université" in low) and any(t.replace("\u00A0"," ") in txt.replace("\u00A0"," ") for t in TARGETS+[REPL]):
+            set_tx_size(h, 10.0)
+
+    # Fiche de cours (22) + cours (20)
+    idx_fiche = None
+    for i, (_,_,h,txt) in enumerate(holders):
+        if "fiche de cours" in txt.lower():
+            set_tx_size(h, 22.0)
+            idx_fiche = i
+            break
+    if idx_fiche is not None:
+        for j in range(idx_fiche+1, len(holders)):
+            txt = holders[j][3].strip()
+            if txt and "fiche de cours" not in txt.lower():
+                set_tx_size(holders[j][2], 20.0)
+                break
+
+    # PLAN -> tout en 11
+    for _,_,h,txt in holders:
+        if "plan" in txt.lower():
+            set_tx_size(h, 11.0)
+
+    # retirer ACTUALISATION éventuel dans les formes
+    for _,_,h,_ in holders:
+        tx = h.find(".//a:txBody", NS)
+        if tx is not None:
+            for t in tx.findall(".//a:t", NS):
+                if t.text: t.text = re.sub(r"(?iu)\bactualisation\b", "", t.text)
+        txbx = h.find(".//wps:txbx/w:txbxContent", NS)
+        if txbx is not None:
+            for t in txbx.findall(".//w:t", NS):
+                if t.text: t.text = re.sub(r"(?iu)\bactualisation\b", "", t.text)
 
 # ───────────────────────── Tables & numérotations ──────────────────
 def tables_and_numbering(root):
@@ -199,8 +274,6 @@ def looks_like_cover_shape(holder):
 def remove_large_grey_rectangles(root, theme_colors: Dict[str, str]):
     """
     Supprime UNIQUEMENT le grand rectangle gris clair de la page de garde.
-    (rect/roundRect DML/VML proches du haut de la page). On NE touche PAS
-    aux autres encadrés (ex. pagination).
     """
     parent_map = build_parent_map(root)
 
@@ -214,11 +287,8 @@ def remove_large_grey_rectangles(root, theme_colors: Dict[str, str]):
             cx = int(extent.get("cx","0")); cy = int(extent.get("cy","0"))
         except: continue
 
-        # seulement si la forme est bien sur la couverture
-        if not looks_like_cover_shape(holder):
-            continue
-
         has_pic = holder.find(".//pic:pic", NS) is not None
+        x_cm, y_cm = holder_pos_cm(holder)
 
         # couleurs (srgb + scheme corrigées par lumMod/lumOff)
         srgb = [el.get("val","").upper() for el in holder.findall(".//a:srgbClr", NS)]
@@ -238,30 +308,38 @@ def remove_large_grey_rectangles(root, theme_colors: Dict[str, str]):
         is_rect  = holder.find(".//a:prstGeom[@prst='rect']", NS) is not None \
                 or holder.find(".//a:prstGeom[@prst='roundRect']", NS) is not None
 
-        big_enough = cx >= cm_to_emu(6) and cy >= cm_to_emu(8)
+        big_on_cover     = looks_like_cover_shape(holder) and cx >= cm_to_emu(6)  and cy >= cm_to_emu(8)
+        very_big_anywhere=                         cx >= cm_to_emu(10) and cy >= cm_to_emu(12)
+        right_half       = x_cm >= 9.0  # approx milieu de page A4 paysage/portrait
 
-        if (not has_pic) and looks_f2 and is_rect and big_enough:
+        if (not has_pic) and is_rect and (
+            (looks_f2 and (big_on_cover or right_half)) or very_big_anywhere
+        ):
             parent = parent_map.get(drawing)
-            if parent is not None: parent.remove(drawing)
+            if parent is not None:
+                parent.remove(drawing)
 
-    # VML hérité (seulement si > haut de page via hauteur/largeur typiques)
+    # VML hérité
     for pict in root.findall(".//w:pict", NS):
         for tag in ("rect","roundrect","shape"):
             for shape in pict.findall(f".//v:{tag}", NS):
                 fill = (shape.get("fillcolor","") or "").upper()
-                if not is_close_grey(fill, "#F2F2F2", 16):  # uniquement le gris clair de couv
-                    continue
                 style = shape.get("style","")
                 m_w = re.search(r"width:([0-9.]+)cm", style)
                 m_h = re.search(r"height:([0-9.]+)cm", style)
-                m_t = re.search(r"top:([0-9.]+)cm", style)  # position verticale
-                if m_w and m_h:
-                    w = float(m_w.group(1)); h = float(m_h.group(1))
-                    # bornage : doit être grand ET proche du haut (top < 20 cm si dispo)
-                    near_top = True if not m_t else (float(m_t.group(1)) < 20.0)
-                    if near_top and (w >= 6 and h >= 8):
-                        parent = parent_map.get(pict)
-                        if parent is not None: parent.remove(pict)
+                m_l = re.search(r"left:([0-9.]+)cm", style)
+                if not (m_w and m_h): 
+                    continue
+                w = float(m_w.group(1)); h = float(m_h.group(1))
+                left_cm = float(m_l.group(1)) if m_l else 0.0
+                big_on_cover = (w >= 6 and h >= 8)
+                very_big_anywhere = (w >= 10 and h >= 12)
+                right_half = left_cm >= 9.0
+                looks_f2 = is_close_grey(fill, "#F2F2F2", 18)  # un peu plus tolérant
+                if ((looks_f2 and (big_on_cover or right_half)) or very_big_anywhere):
+                    parent = parent_map.get(pict)
+                    if parent is not None:
+                        parent.remove(pict)
 
 # ───────────────────────── Légende (optionnelle) ───────────────────
 def build_anchored_image(rId, width_cm, height_cm, left_cm, top_cm, name="Legende"):
@@ -308,7 +386,7 @@ def remove_legend_text(document_xml: bytes) -> bytes:
     for p in root.findall(".//w:p", NS):
         if get_text(p).strip() in lines:
             for t in p.findall(".//w:t", NS): t.text = ""
-            for d in p.findall(".//w:drawing", NS): d.clear()
+            # on ne touche pas aux <w:drawing> ici pour éviter des incohérences de rels
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 def insert_legend_image(document_xml: bytes, rels_xml: bytes, image_bytes: bytes,
@@ -386,58 +464,6 @@ def force_footer_size_10(root):
     for r in root.findall(".//w:r", NS): set_run_props(r, size=10)
     set_dml_text_size(root, 10.0)
 
-# ───────────────────────── Couverture : formes DML/WPS ─────────────
-def tune_cover_dml_textsizes(root):
-    """Fixe les tailles dans les formes sur la couverture : Université 10, Fiche 22, cours 20. Enlève ACTUALISATION."""
-    last_was_fiche = False
-    for holder in root.findall(".//wp:anchor", NS) + root.findall(".//wp:inline", NS):
-        tx = holder.find(".//a:txBody", NS)
-        if tx is None: 
-            # tentatives WPS plus bas
-            continue
-        for t in tx.findall(".//a:t", NS):
-            if t.text: t.text = re.sub(r"(?iu)\bactualisation\b", "", t.text)
-        text = "".join(t.text or "" for t in tx.findall(".//a:t", NS)).strip().lower()
-        if not text: 
-            last_was_fiche = False
-            continue
-        if ("universite" in text) or ("université" in text):
-            set_dml_text_size_in_txbody(tx, 10.0); last_was_fiche = False
-        elif "fiche de cours" in text:
-            set_dml_text_size_in_txbody(tx, 22.0); last_was_fiche = True
-        elif last_was_fiche:
-            set_dml_text_size_in_txbody(tx, 20.0); last_was_fiche = False
-        elif ("introduction" in text and "biologie" in text):
-            set_dml_text_size_in_txbody(tx, 20.0); last_was_fiche = False
-
-def tune_cover_wps_textsizes(root):
-    """Même chose pour les zones de texte WPS (legacy)."""
-    last_was_fiche = False
-    for holder in root.findall(".//wp:anchor", NS) + root.findall(".//wp:inline", NS):
-        txbx = holder.find(".//wps:txbx/w:txbxContent", NS)
-        if txbx is None: 
-            last_was_fiche = False
-            continue
-        full = "".join(t.text or "" for t in txbx.findall(".//w:t", NS)).strip().lower()
-        if not full:
-            last_was_fiche = False
-            continue
-        # purge ACTUALISATION
-        for t in txbx.findall(".//w:t", NS):
-            if t.text: t.text = re.sub(r"(?iu)\bactualisation\b", "", t.text)
-        if "universite" in full or "université" in full:
-            for r in txbx.findall(".//w:r", NS): set_run_props(r, size=10)
-            last_was_fiche = False
-        elif "fiche de cours" in full:
-            for r in txbx.findall(".//w:r", NS): set_run_props(r, size=22)
-            last_was_fiche = True
-        elif last_was_fiche:
-            for r in txbx.findall(".//w:r", NS): set_run_props(r, size=20)
-            last_was_fiche = False
-        elif "introduction" in full and "biologie" in full:
-            for r in txbx.findall(".//w:r", NS): set_run_props(r, size=20)
-            last_was_fiche = False
-
 # ───────────────────────── Processing DOCX ─────────────────────────
 def process_bytes(docx_bytes: bytes,
                   legend_bytes: bytes = None,
@@ -461,8 +487,7 @@ def process_bytes(docx_bytes: bytes,
 
         if name == "word/document.xml":
             cover_sizes_cleanup(root)           # w:p (Fiche 22, cours 20, plan 11, université 10)
-            tune_cover_dml_textsizes(root)      # formes DML
-            tune_cover_wps_textsizes(root)      # formes WPS
+            tune_cover_shapes_spatial(root)     # formes (spatial + robuste)
             tables_and_numbering(root)
             reposition_small_icon(root, icon_left, icon_top)
             remove_large_grey_rectangles(root, theme_colors)  # SEULEMENT la grande boîte de couv
