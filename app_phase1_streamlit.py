@@ -112,7 +112,7 @@ def force_calibri(root):
     for r in root.findall(".//w:r", NS):
         set_run_props(r, calibri=True)
 
-# ── recoloration texte rouge/bleu → noir (inchangé vs version précédente)
+# ── recoloration texte rouge/bleu → noir (tel que demandé précédemment)
 def red_to_black(root):
     RED_HEX = {
         "FF0000","C00000","CC0000","E60000","ED1C24","F44336","DC143C","B22222","E74C3C","D0021B"
@@ -151,7 +151,7 @@ def red_to_black(root):
             for a in ("themeColor", "themeTint", "themeShade"):
                 c.attrib.pop(f"{{{W}}}{a}", None)
 
-# ── NOUVEAU : puces rouges → noires dans numbering.xml
+# ── 1) Puces rouges → noires : numbering.xml
 def force_red_bullets_black_in_numbering(root):
     """
     Met en noir les couleurs des symboles de liste définies dans word/numbering.xml
@@ -173,7 +173,79 @@ def force_red_bullets_black_in_numbering(root):
                 rgb = _hex_to_rgb(val)
                 if rgb and looks_red(rgb):
                     make_black = True
-        # Si la couleur n'est pas fixée (ex: themeColor), on ne touche pas.
+        if make_black:
+            col.set(f"{{{W}}}val", "000000")
+            for a in ("themeColor","themeTint","themeShade"):
+                col.attrib.pop(f"{{{W}}}{a}", None)
+
+# ── 2) Puces rouges → noires : styles de liste (styles.xml)
+def force_red_bullets_black_in_styles(root):
+    """
+    Corrige les styles de liste (ex: List Paragraph, Puces, Bullet…).
+    Si un style de paragraphe 'liste' définit w:rPr/w:color rouge, on force noir.
+    """
+    CANDIDATES = {"list","bullet","puce","puces","liste"}
+    RED_HEX = {"FF0000","C00000","CC0000","E60000","ED1C24","F44336","DC143C","B22222","E74C3C","D0021B"}
+    def looks_red(rgb: Tuple[int,int,int]) -> bool:
+        if not rgb: return False
+        r,g,b = rgb
+        return (r >= 170 and g <= 110 and b <= 110)
+
+    for st in root.findall(".//w:style[@w:type='paragraph']", NS):
+        name_el = st.find("w:name", NS)
+        style_id = (st.get(f"{{{W}}}styleId") or "").lower()
+        style_name = (name_el.get(f"{{{W}}}val") if name_el is not None else "").lower()
+        tag = (style_id + " " + style_name)
+        if not any(tok in tag for tok in CANDIDATES):
+            continue
+        col = st.find(".//w:rPr/w:color", NS)
+        if col is None:
+            continue
+        val = (col.get(f"{{{W}}}val") or "").strip().upper()
+        make_black = False
+        if re.fullmatch(r"[0-9A-F]{6}", val or ""):
+            if val in RED_HEX:
+                make_black = True
+            else:
+                rgb = _hex_to_rgb(val)
+                if rgb and looks_red(rgb):
+                    make_black = True
+        if make_black:
+            col.set(f"{{{W}}}val", "000000")
+            for a in ("themeColor","themeTint","themeShade"):
+                col.attrib.pop(f"{{{W}}}{a}", None)
+
+# ── 3) Puces rouges → noires : au niveau des paragraphes numérotés (document.xml)
+def force_red_bullets_black_in_paragraphs(root):
+    """
+    Pour chaque w:p qui a w:numPr (liste), si le paragraphe porte un w:pPr/w:rPr/w:color rouge,
+    on force le noir. N'altère pas la couleur des runs ayant déjà leur propre w:color.
+    """
+    RED_HEX = {"FF0000","C00000","CC0000","E60000","ED1C24","F44336","DC143C","B22222","E74C3C","D0021B"}
+    def looks_red(rgb: Tuple[int,int,int]) -> bool:
+        if not rgb: return False
+        r,g,b = rgb
+        return (r >= 170 and g <= 110 and b <= 110)
+
+    for p in root.findall(".//w:p[w:pPr/w:numPr]", NS):
+        pPr = p.find("w:pPr", NS)
+        if pPr is None:
+            continue
+        rPr = pPr.find("w:rPr", NS)
+        if rPr is None:
+            continue
+        col = rPr.find("w:color", NS)
+        if col is None:
+            continue
+        val = (col.get(f"{{{W}}}val") or "").strip().upper()
+        make_black = False
+        if re.fullmatch(r"[0-9A-F]{6}", val or ""):
+            if val in RED_HEX:
+                make_black = True
+            else:
+                rgb = _hex_to_rgb(val)
+                if rgb and looks_red(rgb):
+                    make_black = True
         if make_black:
             col.set(f"{{{W}}}val", "000000")
             for a in ("themeColor","themeTint","themeShade"):
@@ -604,7 +676,7 @@ def process_bytes(
         replace_years(root)
         strip_actualisation_everywhere(root)
         force_calibri(root)
-        red_to_black(root)  # texte rouge/bleu → noir
+        red_to_black(root)  # texte rouge/bleu → noir (comme avant)
 
         if name == "word/document.xml":
             cover_sizes_cleanup(root)
@@ -612,10 +684,16 @@ def process_bytes(
             tables_and_numbering(root)
             reposition_small_icon(root, icon_left, icon_top)
             remove_large_grey_rectangles(root, theme_colors)
+            # 3) Paragraphe : puces rouges -> noires
+            force_red_bullets_black_in_paragraphs(root)
 
-        # NOUVEAU : puces rouges → noires (définies dans numbering.xml)
+        # 1) Numbering : puces rouges -> noires
         if name == "word/numbering.xml":
             force_red_bullets_black_in_numbering(root)
+
+        # 2) Styles : puces rouges -> noires sur styles de liste
+        if name == "word/styles.xml":
+            force_red_bullets_black_in_styles(root)
 
         if name.startswith("word/footer"):
             force_footer_size_10(root)
