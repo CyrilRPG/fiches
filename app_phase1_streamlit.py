@@ -368,10 +368,10 @@ def reposition_small_icon(root, left_cm=15.3, top_cm=11.0):
     anchor = chosen[2]
 
     # repositionnement exact
-    posH = anchor.find("wp:positionH", NS) or ET.SubElement(anchor, f"{{{WP}}}positionH")
+    posH = anchor.find("wp:positionH", NS) or ET.SubElement(anchor, f"{{{WP}}}positionH"})
     for ch in list(posH): posH.remove(ch)
     posH.set("relativeFrom","page"); ET.SubElement(posH, f"{{{WP}}}posOffset").text = str(cm_to_emu(left_cm))
-    posV = anchor.find("wp:positionV", NS) or ET.SubElement(anchor, f"{{{WP}}}positionV")
+    posV = anchor.find("wp:positionV", NS) or ET.SubElement(anchor, f"{{{WP}}}positionV"})
     for ch in list(posV): posV.remove(ch)
     posV.set("relativeFrom","page"); ET.SubElement(posV, f"{{{WP}}}posOffset").text = str(cm_to_emu(top_cm))
 
@@ -497,7 +497,6 @@ def cleaned_filename(original_name: str) -> str:
     base, ext = os.path.splitext(original_name)
     base = re.sub(r"(?iu)\bactu\b", "", base)
     base = normalize_spaces(base)
-    # enlever espaces avant ponctuation courante
     base = re.sub(r"\s+([\-_,])", r"\1", base)
     if not ext.lower().endswith(".docx"):
         ext = ".docx"
