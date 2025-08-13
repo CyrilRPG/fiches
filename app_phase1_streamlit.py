@@ -38,11 +38,11 @@ def get_text(p) -> str:
     return "".join(t.text or "" for t in p.findall(".//w:t", NS))
 
 def set_run_props(run, size=None, bold=None, italic=None, color=None, calibri=False):
-    """
-    Applique sélectivement certaines propriétés de mise en forme.
-    On **n’impose plus Calibri** globalement afin de préserver le design du modèle.
-    """
     rPr = run.find("w:rPr", NS) or ET.SubElement(run, f"{{{W}}}rPr")
+    if calibri:
+        rFonts = rPr.find("w:rFonts", NS) or ET.SubElement(rPr, f"{{{W}}}rFonts")
+        for k in ("ascii", "hAnsi", "cs"):
+            rFonts.set(f"{{{W}}}{k}", "Calibri")
     if size is not None:
         v = str(int(round(size * 2)))
         (rPr.find("w:sz", NS) or ET.SubElement(rPr, f"{{{W}}}sz")).set(f"{{{W}}}val", v)
@@ -83,7 +83,7 @@ def normalize_spaces(s: str) -> str:
     return s
 
 # ───────────────────────── Remplacements texte ─────────────────────
-def replace_years(root: ET.Element):
+def replace_years(root):
     for p in root.findall(".//w:p", NS):
         wts = p.findall(".//w:t", NS)
         if not wts:
@@ -103,20 +103,24 @@ def replace_years(root: ET.Element):
         if new != txt:
             redistribute(ats, new)
 
-def strip_actualisation_everywhere(root: ET.Element):
+def strip_actualisation_everywhere(root):
     for t in root.findall(".//w:t", NS) + root.findall(".//a:t", NS):
         if t.text:
             t.text = re.sub(r"(?iu)\bactualisation\b", "", t.text)
 
-def red_to_black(root: ET.Element):
+def force_calibri(root):
+    for r in root.findall(".//w:r", NS):
+        set_run_props(r, calibri=True)
+
+def red_to_black(root):
     for r in root.findall(".//w:r", NS):
         rPr = r.find("w:rPr", NS)
         c = None if rPr is None else rPr.find("w:color", NS)
         if c is not None and (c.get(f"{{{W}}}val", "").upper() == "FF0000"):
             c.set(f"{{{W}}}val", "000000")
 
-# ───────────────────────── Mise en forme couverture ────────────────
-def holder_pos_cm(holder: ET.Element) -> Tuple[float, float]:
+# ───────────────────────── Helpers couvertures (formes) ────────────
+def holder_pos_cm(holder) -> Tuple[float, float]:
     try:
         x = int((holder.find("wp:positionH/wp:posOffset", NS) or ET.Element("x")).text or "0")
         y = int((holder.find("wp:positionV/wp:posOffset", NS) or ET.Element("y")).text or "0")
@@ -124,7 +128,7 @@ def holder_pos_cm(holder: ET.Element) -> Tuple[float, float]:
     except Exception:
         return (0.0, 0.0)
 
-def get_tx_text(holder: ET.Element) -> str:
+def get_tx_text(holder) -> str:
     tx = holder.find(".//a:txBody", NS)
     if tx is not None:
         return "".join(t.text or "" for t in tx.findall(".//a:t", NS)).strip()
@@ -133,7 +137,7 @@ def get_tx_text(holder: ET.Element) -> str:
         return "".join(t.text or "" for t in txbx.findall(".//w:t", NS)).strip()
     return ""
 
-def set_tx_size(holder: ET.Element, pt: float):
+def set_tx_size(holder, pt: float):
     tx = holder.find(".//a:txBody", NS)
     if tx is not None:
         set_dml_text_size_in_txbody(tx, pt)
@@ -142,7 +146,16 @@ def set_tx_size(holder: ET.Element, pt: float):
         for r in txbx.findall(".//w:r", NS):
             set_run_props(r, size=pt)
 
-def cover_sizes_cleanup(root: ET.Element):
+# ───────────────────────── Mise en forme couverture (paragraphes) ─
+def cover_sizes_cleanup(root):
+    """
+    Applique les tailles spécifiques aux paragraphes de la couverture.
+
+    - Les paragraphes contenant « Fiche de cours » sont mis en 22 pt.
+    - La ligne suivant immédiatement une ligne « Fiche de cours » non vide est mise en 20 pt (nom du cours).
+    - Les paragraphes contenant « université » et l’une des années cibles sont mis en 10 pt.
+    - Le texte « ACTUALISATION » est supprimé.
+    """
     paras = root.findall(".//w:p", NS)
     texts = [get_text(p).strip() for p in paras]
 
@@ -151,7 +164,6 @@ def cover_sizes_cleanup(root: ET.Element):
             set_run_props(r, size=pt)
 
     last_was_fiche = False
-    in_plan = False
 
     for i, txt in enumerate(texts):
         low = txt.lower()
@@ -165,7 +177,6 @@ def cover_sizes_cleanup(root: ET.Element):
         if "fiche de cours" in low:
             set_size(paras[i], 22)
             last_was_fiche = True
-            in_plan = False
             continue
         if last_was_fiche and txt:
             set_size(paras[i], 20)
@@ -176,17 +187,19 @@ def cover_sizes_cleanup(root: ET.Element):
         ):
             set_size(paras[i], 10)
 
-        if txt.strip().upper() == "PLAN":
-            set_size(paras[i], 11)
-            in_plan = True
-            continue
-        if in_plan:
-            if txt.strip() == "" or low.startswith("légende"):
-                in_plan = False
-            else:
-                set_size(paras[i], 11)
+        # On ne modifie plus la taille des paragraphes contenant « PLAN » ni des éléments du plan.
 
-def tune_cover_shapes_spatial(root: ET.Element):
+# ───────────────────────── Couverture : formes DML/WPS (spatial) ──
+def tune_cover_shapes_spatial(root):
+    """
+    Prend toutes les formes (anchor/inline), lit leur texte et position (x, y),
+    puis applique les règles suivantes :
+
+    - Les formes contenant « Fiche de cours … » sont mises en 22 pt.
+    - La première forme non vide suivant une forme « Fiche de cours … » est mise en 20 pt.
+    - Les formes contenant « université » et l’une des années ciblées sont mises en 10 pt.
+    - Aucune modification de taille n’est appliquée aux titres ou éléments du plan.
+    """
     holders = []
     for holder in root.findall(".//wp:anchor", NS) + root.findall(".//wp:inline", NS):
         txt = get_tx_text(holder)
@@ -217,17 +230,14 @@ def tune_cover_shapes_spatial(root: ET.Element):
             break
     if idx_fiche is not None:
         for j in range(idx_fiche + 1, len(holders)):
-            txt = holders[j][3].strip()
-            if txt and "fiche de cours" not in txt.lower():
+            txt_next = holders[j][3].strip()
+            if txt_next and "fiche de cours" not in txt_next.lower():
                 set_tx_size(holders[j][2], 20.0)
                 break
 
-    # PLAN -> tout en 11
-    for _, _, h, txt in holders:
-        if "plan" in txt.lower():
-            set_tx_size(h, 11.0)
+    # On ne modifie plus la taille du plan.
 
-    # retirer ACTUALISATION éventuel dans les formes
+    # supprimer le mot « ACTUALISATION » dans toutes les formes
     for _, _, h, _ in holders:
         tx = h.find(".//a:txBody", NS)
         if tx is not None:
@@ -240,7 +250,8 @@ def tune_cover_shapes_spatial(root: ET.Element):
                 if t.text:
                     t.text = re.sub(r"(?iu)\bactualisation\b", "", t.text)
 
-def tables_and_numbering(root: ET.Element):
+# ───────────────────────── Tables & numérotations ──────────────────
+def tables_and_numbering(root):
     for tbl in root.findall(".//w:tbl", NS):
         rows = tbl.findall(".//w:tr", NS)
         if not rows:
@@ -257,7 +268,7 @@ def tables_and_numbering(root: ET.Element):
             for r in p.findall(".//w:r", NS):
                 set_run_props(r, size=10, bold=True, italic=True, color="FFFFFF")
 
-# ───────────────────────── Suppression du panneau gris ─────────────
+# ───────────────────────── Couverture : suppression rectangle gris ─
 def extract_theme_colors(parts: Dict[str, bytes]) -> Dict[str, str]:
     data = parts.get("word/theme/theme1.xml")
     if not data:
@@ -300,7 +311,6 @@ def remove_large_grey_rectangles(root: ET.Element, theme_colors: Dict[str, str])
         if holder.find(".//pic:pic", NS) is not None:
             continue
 
-        # calcul des positions
         x_el = holder.find(".//wp:positionH/wp:posOffset", NS)
         y_el = holder.find(".//wp:positionV/wp:posOffset", NS)
         try:
@@ -309,13 +319,11 @@ def remove_large_grey_rectangles(root: ET.Element, theme_colors: Dict[str, str])
         except Exception:
             x_cm = y_cm = 0.0
 
-        # type de la géométrie
         is_rect = holder.find(".//a:prstGeom[@prst='rect']", NS) is not None or \
                   holder.find(".//a:prstGeom[@prst='roundRect']", NS) is not None
         if not is_rect:
             continue
 
-        # couleurs explicites (srgbClr)
         srgb_colors = [el.get("val", "").upper() for el in holder.findall(".//a:srgbClr", NS)]
         looks_f2 = False
         for v in srgb_colors:
@@ -340,7 +348,196 @@ def remove_large_grey_rectangles(root: ET.Element, theme_colors: Dict[str, str])
             if parent is not None:
                 parent.remove(drawing)
 
-# ───────────────────────── Traitement du document ──────────────────
+    for pict in root.findall(".//w:pict", NS):
+        for tag in ("rect", "roundrect", "shape"):
+            for shape in pict.findall(f".//v:{tag}", NS):
+                fill = (shape.get("fillcolor", "") or "").upper()
+                style = shape.get("style", "")
+                m_w = re.search(r"width:([0-9.]+)cm", style)
+                m_h = re.search(r"height:([0-9.]+)cm", style)
+                m_l = re.search(r"left:([0-9.]+)cm", style)
+                if not (m_w and m_h):
+                    continue
+                w = float(m_w.group(1))
+                h = float(m_h.group(1))
+                left_cm = float(m_l.group(1)) if m_l else 0.0
+                big_on_cover = (w >= 6 and h >= 8)
+                very_big_anywhere = (w >= 10 and h >= 12)
+                right_half = left_cm >= 9.0
+                looks_f2 = abs(int(fill[0:2], 16) - 0xF2) <= 16 and \
+                           abs(int(fill[2:4], 16) - 0xF2) <= 16 and \
+                           abs(int(fill[4:6], 16) - 0xF2) <= 16
+                if ((looks_f2 and (big_on_cover or right_half)) or very_big_anywhere):
+                    parent = parent_map.get(pict)
+                    if parent is not None:
+                        parent.remove(pict)
+
+# ───────────────────────── Légende (optionnelle) ───────────────────
+def build_anchored_image(rId, width_cm, height_cm, left_cm, top_cm, name="Legende"):
+    cx, cy = cm_to_emu(width_cm), cm_to_emu(height_cm)
+    xoff, yoff = cm_to_emu(left_cm), cm_to_emu(top_cm)
+    drawing = ET.Element(f"{{{W}}}drawing")
+    anchor = ET.SubElement(
+        drawing,
+        f"{{{WP}}}anchor",
+        {
+            "distT": "0",
+            "distB": "0",
+            "distL": "0",
+            "distR": "0",
+            "simplePos": "0",
+            "relativeHeight": "0",
+            "behindDoc": "0",
+            "locked": "0",
+            "layoutInCell": "1",
+            "allowOverlap": "1",
+        },
+    )
+    ET.SubElement(anchor, f"{{{WP}}}simplePos", {"x": "0", "y": "0"})
+    posH = ET.SubElement(anchor, f"{{{WP}}}positionH", {"relativeFrom": "page"})
+    ET.SubElement(posH, f"{{{WP}}}posOffset").text = str(xoff)
+    posV = ET.SubElement(anchor, f"{{{WP}}}positionV", {"relativeFrom": "page"})
+    ET.SubElement(posV, f"{{{WP}}}posOffset").text = str(yoff)
+    ET.SubElement(anchor, f"{{{WP}}}extent", {"cx": str(cx), "cy": str(cy)})
+    ET.SubElement(anchor, f"{{{WP}}}effectExtent", {"l": "0", "t": "0", "r": "0", "b": "0"})
+    ET.SubElement(anchor, f"{{{WP}}}wrapNone")
+    ET.SubElement(anchor, f"{{{WP}}}docPr", {"id": "10", "name": name})
+    ET.SubElement(anchor, f"{{{WP}}}cNvGraphicFramePr")
+    graphic = ET.SubElement(anchor, f"{{{A}}}graphic")
+    gData = ET.SubElement(graphic, f"{{{A}}}graphicData", {"uri": "http://schemas.openxmlformats.org/drawingml/2006/picture"})
+    pic = ET.SubElement(gData, f"{{{PIC}}}pic")
+    nvPicPr = ET.SubElement(pic, f"{{{PIC}}}nvPicPr")
+    ET.SubElement(nvPicPr, f"{{{PIC}}}cNvPr", {"id": "0", "name": name + ".img"})
+    ET.SubElement(nvPicPr, f"{{{PIC}}}cNvPicPr")
+    blipFill = ET.SubElement(pic, f"{{{PIC}}}blipFill")
+    ET.SubElement(blipFill, f"{{{A}}}blip", {f"{{{R}}}embed": rId})
+    stretch = ET.SubElement(blipFill, f"{{{A}}}stretch")
+    ET.SubElement(stretch, f"{{{A}}}fillRect")
+    spPr = ET.SubElement(pic, f"{{{PIC}}}spPr")
+    xfrm = ET.SubElement(spPr, f"{{{A}}}xfrm")
+    ET.SubElement(xfrm, f"{{{A}}}off", {"x": "0", "y": "0"})
+    ET.SubElement(xfrm, f"{{{A}}}ext", {"cx": str(cx), "cy": str(cy)})
+    prst = ET.SubElement(spPr, f"{{{A}}}prstGeom", {"prst": "rect"})
+    ET.SubElement(prst, f"{{{A}}}avLst")
+    return drawing
+
+def remove_legend_text(document_xml: bytes) -> bytes:
+    root = ET.fromstring(document_xml)
+    for p in root.findall(".//w:p", NS):
+        if get_text(p).strip().lower() == "légendes":
+            for t in p.findall(".//w:t", NS):
+                t.text = ""
+    lines = {
+        "Notion nouvelle cette année",
+        "Notion hors programme",
+        "Notion déjà tombée au concours",
+        "Astuces et méthodes",
+    }
+    for p in root.findall(".//w:p", NS):
+        if get_text(p).strip() in lines:
+            for t in p.findall(".//w:t", NS):
+                t.text = ""
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+def insert_legend_image(
+    document_xml: bytes,
+    rels_xml: bytes,
+    image_bytes: bytes,
+    left_cm=2.25,
+    top_cm=25.0,
+    width_cm=5.68,
+    height_cm=3.77,
+) -> Tuple[bytes, bytes, Tuple[str, bytes]]:
+    root = ET.fromstring(document_xml)
+    rels = ET.fromstring(rels_xml)
+    paras = root.findall(".//w:p", NS)
+    idx = None
+    for i, p in enumerate(paras):
+        if get_text(p).strip().lower().startswith("légendes"):
+            idx = i
+            break
+    if idx is None and paras:
+        idx = 0
+
+    nums = []
+    for rel in rels.findall(f".//{{{P_REL}}}Relationship"):
+        rid = rel.get("Id", "")
+        if rid.startswith("rId"):
+            try:
+                nums.append(int(rid[3:]))
+            except Exception:
+                pass
+    new_rid = f"rId{(max(nums) if nums else 0) + 1}"
+    media_name = "media/image_legende.png"
+    rel = ET.SubElement(rels, f"{{{P_REL}}}Relationship")
+    rel.set("Id", new_rid)
+    rel.set("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image")
+    rel.set("Target", media_name)
+
+    drawing = build_anchored_image(new_rid, width_cm, height_cm, left_cm, top_cm, "Legende")
+    (ET.SubElement(paras[idx], f"{{{W}}}r") if idx is not None else ET.SubElement(ET.SubElement(root, f"{{{W}}}p"), f"{{{W}}}r")).append(drawing)
+
+    return (
+        ET.tostring(root, encoding="utf-8", xml_declaration=True),
+        ET.tostring(rels, encoding="utf-8", xml_declaration=True),
+        (f"word/{media_name}", image_bytes),
+    )
+
+# ───────────────────────── Reposition icône écriture ───────────────
+def reposition_small_icon(root, left_cm=15.3, top_cm=11.0):
+    cand = []
+    for anchor in root.findall(".//wp:anchor", NS):
+        extent = anchor.find("wp:extent", NS)
+        if extent is None:
+            continue
+        try:
+            cx = int(extent.get("cx", "0"))
+            cy = int(extent.get("cy", "0"))
+        except Exception:
+            continue
+        if anchor.find(".//pic:pic", NS) is None:
+            continue
+        if cx > cm_to_emu(3.0) or cy > cm_to_emu(3.0):
+            continue
+        x = anchor.findtext("wp:positionH/wp:posOffset", default="0", namespaces=NS)
+        y = anchor.findtext("wp:positionV/wp:posOffset", default="0", namespaces=NS)
+        try:
+            x_cm = emu_to_cm(int(x))
+            y_cm = emu_to_cm(int(y))
+        except Exception:
+            x_cm, y_cm = 0.0, 0.0
+        cand.append((x_cm, y_cm, anchor))
+    if not cand:
+        return
+    chosen = max(cand, key=lambda t: t[0])
+    anchor = chosen[2]
+
+    posH = anchor.find("wp:positionH", NS) or ET.SubElement(anchor, f"{{{WP}}}positionH")
+    for ch in list(posH):
+        posH.remove(ch)
+    posH.set("relativeFrom", "page")
+    ET.SubElement(posH, f"{{{WP}}}posOffset").text = str(cm_to_emu(left_cm))
+    posV = anchor.find("wp:positionV", NS) or ET.SubElement(anchor, f"{{{WP}}}positionV")
+    for ch in list(posV):
+        posV.remove(ch)
+    posV.set("relativeFrom", "page")
+    ET.SubElement(posV, f"{{{WP}}}posOffset").text = str(cm_to_emu(top_cm))
+
+# ───────────────────────── Pieds de page 10 pt ─────────────────────
+def set_dml_text_size(root, pt: float):
+    val = str(int(round(pt * 100)))
+    for r in root.findall(".//a:r", NS):
+        rPr = r.find("a:rPr", NS) or ET.SubElement(r, f"{{{A}}}rPr")
+        rPr.set("sz", val)
+
+def force_footer_size_10(root):
+    for r in root.findall(".//w:r", NS):
+        if r.find("w:fldChar", NS) is not None or r.find("w:instrText", NS) is not None:
+            continue
+        set_run_props(r, size=10)
+    set_dml_text_size(root, 10.0)
+
+# ───────────────────────── Processing DOCX ─────────────────────────
 def process_bytes(
     docx_bytes: bytes,
     legend_bytes: bytes = None,
@@ -364,23 +561,23 @@ def process_bytes(
         except ET.ParseError:
             continue
 
-        # texte : remplacements
         replace_years(root)
         strip_actualisation_everywhere(root)
+        force_calibri(root)
         red_to_black(root)
 
         if name == "word/document.xml":
             cover_sizes_cleanup(root)
             tune_cover_shapes_spatial(root)
             tables_and_numbering(root)
-            # pas de repositionnement forcé de l’icône d’écriture
+            reposition_small_icon(root, icon_left, icon_top)
             remove_large_grey_rectangles(root, theme_colors)
 
-        # on ne touche plus aux pieds de page : la numérotation reste intacte
+        if name.startswith("word/footer"):
+            force_footer_size_10(root)
 
         parts[name] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
-    # Légende optionnelle
     if legend_bytes and "word/document.xml" in parts and "word/_rels/document.xml.rels" in parts:
         parts["word/document.xml"] = remove_legend_text(parts["word/document.xml"])
         new_doc, new_rels, media = insert_legend_image(
@@ -419,17 +616,17 @@ st.caption("Transforme tes .docx des fiches actualisées de 2024-2025 en fiches 
 
 with st.sidebar:
     st.subheader("Paramètres (cm)")
-    icon_left = st.number_input("Icône écriture — gauche", value=15.3, step=0.1)
-    icon_top = st.number_input("Icône écriture — haut", value=11.0, step=0.1)
-    legend_left = st.number_input("Image Légendes — gauche", value=2.25, step=0.1)
-    legend_top = st.number_input("Image Légendes — haut", value=25.0, step=0.1)
-    legend_w = st.number_input("Image Légendes — largeur", value=5.68, step=0.01)
-    legend_h = st.number_input("Image Légendes — hauteur", value=3.77, step=0.01)
+    icon_left  = st.number_input("Icône écriture — gauche", value=15.3, step=0.1)
+    icon_top   = st.number_input("Icône écriture — haut",   value=11.0, step=0.1)
+    legend_left= st.number_input("Image Légendes — gauche", value=2.25, step=0.1)
+    legend_top = st.number_input("Image Légendes — haut",   value=25.0, step=0.1)
+    legend_w   = st.number_input("Image Légendes — largeur",value=5.68, step=0.01)
+    legend_h   = st.number_input("Image Légendes — hauteur",value=3.77, step=0.01)
 
-st.markdown("**1) Glisse/dépose un ou plusieurs fichiers `.docx`**")
+st.markdown("**1) Glisse/dépose un ou plusieurs fichiers .docx**")
 files = st.file_uploader("DOCX à traiter", type=["docx"], accept_multiple_files=True)
 st.markdown("**2) (Optionnel) Ajoute l’image de la Légende (PNG/JPG)**")
-legend_file = st.file_uploader("Image Légendes", type=["png", "jpg", "jpeg", "webp"], accept_multiple_files=False)
+legend_file = st.file_uploader("Image Légendes", type=["png","jpg","jpeg","webp"], accept_multiple_files=False)
 
 if st.button("⚙️ Lancer le traitement", type="primary", disabled=not files):
     if not files:
