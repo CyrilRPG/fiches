@@ -104,9 +104,12 @@ def replace_years(root):
             redistribute(ats, new)
 
 def strip_actualisation_everywhere(root):
+    """
+    Supprime les termes « ACTUALISATION » et « NOUVELLE FICHE » dans tous les textes (w:t et a:t).
+    """
     for t in root.findall(".//w:t", NS) + root.findall(".//a:t", NS):
         if t.text:
-            t.text = re.sub(r"(?iu)\bactualisation\b", "", t.text)
+            t.text = re.sub(r"(?iu)\b(actualisation|nouvelle\s+fiche)\b", "", t.text)
 
 def force_calibri(root):
     for r in root.findall(".//w:r", NS):
@@ -149,12 +152,11 @@ def set_tx_size(holder, pt: float):
 # ───────────────────────── Mise en forme couverture (paragraphes) ─
 def cover_sizes_cleanup(root):
     """
-    Applique les tailles spécifiques aux paragraphes de la couverture.
-
-    - « Fiche de cours … » → 22 pt
-    - Ligne immédiatement après une « Fiche de cours … » non vide → 20 pt
-    - Paragraphes contenant « université » et l’une des années cibles → 10 pt
-    - Suppression du mot ACTUALISATION
+    Applique les tailles spécifiques aux paragraphes de la couverture :
+    - « Fiche de cours … » → 22 pt
+    - La ligne suivante non vide → 20 pt (nom du cours)
+    - Paragraphes contenant « université » et l’une des années cibles → 10 pt
+    - Suppression de « ACTUALISATION » et « NOUVELLE FICHE »
     """
     paras = root.findall(".//w:p", NS)
     texts = [get_text(p).strip() for p in paras]
@@ -168,10 +170,11 @@ def cover_sizes_cleanup(root):
     for i, txt in enumerate(texts):
         low = txt.lower()
 
-        if txt.strip().upper() == "ACTUALISATION":
+        # suppression des mentions
+        if txt.strip().upper() in ("ACTUALISATION", "NOUVELLE FICHE"):
             for t in paras[i].findall(".//w:t", NS):
                 if t.text:
-                    t.text = re.sub(r"(?iu)actualisation", "", t.text)
+                    t.text = re.sub(r"(?iu)\b(actualisation|nouvelle\s+fiche)\b", "", t.text)
             continue
 
         if "fiche de cours" in low:
@@ -187,17 +190,14 @@ def cover_sizes_cleanup(root):
         ):
             set_size(paras[i], 10)
 
-        # Pas de modification de taille pour les titres/éléments du plan.
-
 # ───────────────────────── Couverture : formes DML/WPS (spatial) ──
 def tune_cover_shapes_spatial(root):
     """
-    Traite toutes les formes (anchors/inline) de la page de garde et applique :
-
-    - « Fiche de cours … » → 22 pt
-    - Première forme non vide après « Fiche de cours … » → 20 pt
-    - Formes contenant « université » et une année ciblée → 10 pt
-    - Pas de modification de taille sur « PLAN » ou ses éléments
+    Ajuste les tailles des formes de la page de garde :
+    - « Fiche de cours … » → 22 pt
+    - Première forme non vide après « Fiche de cours … » → 20 pt
+    - Formes contenant « université » et une année ciblée → 10 pt
+    - Supprime « ACTUALISATION » et « NOUVELLE FICHE » dans les formes
     """
     holders = []
     for holder in root.findall(".//wp:anchor", NS) + root.findall(".//wp:inline", NS):
@@ -220,7 +220,7 @@ def tune_cover_shapes_spatial(root):
         ):
             set_tx_size(h, 10.0)
 
-    # « Fiche de cours … » et cours (22 puis 20)
+    # « Fiche de cours … » et la forme suivante
     idx_fiche = None
     for i, (_, _, h, txt) in enumerate(holders):
         if "fiche de cours" in txt.lower():
@@ -234,18 +234,18 @@ def tune_cover_shapes_spatial(root):
                 set_tx_size(holders[j][2], 20.0)
                 break
 
-    # suppression du texte ACTUALISATION dans les formes
+    # suppression du texte ACTUALISATION et NOUVELLE FICHE dans les formes
     for _, _, h, _ in holders:
         tx = h.find(".//a:txBody", NS)
         if tx is not None:
             for t in tx.findall(".//a:t", NS):
                 if t.text:
-                    t.text = re.sub(r"(?iu)\bactualisation\b", "", t.text)
+                    t.text = re.sub(r"(?iu)\b(actualisation|nouvelle\s+fiche)\b", "", t.text)
         txbx = h.find(".//wps:txbx/w:txbxContent", NS)
         if txbx is not None:
             for t in txbx.findall(".//w:t", NS):
                 if t.text:
-                    t.text = re.sub(r"(?iu)\bactualisation\b", "", t.text)
+                    t.text = re.sub(r"(?iu)\b(actualisation|nouvelle\s+fiche)\b", "", t.text)
 
 # ───────────────────────── Tables & numérotations ──────────────────
 def tables_and_numbering(root):
@@ -290,8 +290,13 @@ def extract_theme_colors(parts: Dict[str, bytes]) -> Dict[str, str]:
     return colors
 
 def remove_large_grey_rectangles(root: ET.Element, theme_colors: Dict[str, str]):
+    """
+    Supprime uniquement le grand rectangle gris clair situé sur la moitié droite de la couverture
+    ou les très grandes formes (≥ 10×12 cm) n’importe où. Les formes à gauche (plan) sont conservées.
+    """
     parent_map = {child: parent for parent in root.iter() for child in parent}
 
+    # DML (DrawingML)
     for drawing in root.findall(".//w:drawing", NS):
         holder = drawing.find(".//wp:anchor", NS) or drawing.find(".//wp:inline", NS)
         if holder is None:
@@ -334,17 +339,19 @@ def remove_large_grey_rectangles(root: ET.Element, theme_colors: Dict[str, str])
 
         width_cm = emu_to_cm(cx)
         height_cm = emu_to_cm(cy)
-        big_on_cover = y_cm < 20.0 and width_cm >= 6.0 and height_cm >= 8.0
+        on_right = x_cm >= 9.0  # moitié droite de la page
         very_big_anywhere = width_cm >= 10.0 and height_cm >= 12.0
-        very_big_right = (x_cm >= 9.0) and (width_cm >= 7.0) and (height_cm >= 12.0)
 
-        if ((srgb_colors and looks_f2 and (big_on_cover or x_cm >= 9.0)) or
-            very_big_anywhere or
-            very_big_right):
+        # On supprime si :
+        # - la couleur explicite est gris clair ET la forme est assez grande ET positionnée à droite
+        # - ou bien la forme est extrêmement grande n’importe où
+        if ((srgb_colors and looks_f2 and on_right and width_cm >= 6.0 and height_cm >= 8.0) or
+            very_big_anywhere):
             parent = parent_map.get(drawing)
             if parent is not None:
                 parent.remove(drawing)
 
+    # VML (formes héritées)
     for pict in root.findall(".//w:pict", NS):
         for tag in ("rect", "roundrect", "shape"):
             for shape in pict.findall(f".//v:{tag}", NS):
@@ -358,13 +365,16 @@ def remove_large_grey_rectangles(root: ET.Element, theme_colors: Dict[str, str])
                 w = float(m_w.group(1))
                 h = float(m_h.group(1))
                 left_cm = float(m_l.group(1)) if m_l else 0.0
-                big_on_cover = (w >= 6 and h >= 8)
+                on_right = left_cm >= 9.0
                 very_big_anywhere = (w >= 10 and h >= 12)
-                right_half = left_cm >= 9.0
-                looks_f2 = abs(int(fill[0:2], 16) - 0xF2) <= 16 and \
-                           abs(int(fill[2:4], 16) - 0xF2) <= 16 and \
-                           abs(int(fill[4:6], 16) - 0xF2) <= 16
-                if ((looks_f2 and (big_on_cover or right_half)) or very_big_anywhere):
+                # teste la couleur gris clair
+                try:
+                    looks_f2 = abs(int(fill[0:2], 16) - 0xF2) <= 16 and \
+                               abs(int(fill[2:4], 16) - 0xF2) <= 16 and \
+                               abs(int(fill[4:6], 16) - 0xF2) <= 16
+                except Exception:
+                    looks_f2 = False
+                if ((looks_f2 and on_right and w >= 6 and h >= 8) or very_big_anywhere):
                     parent = parent_map.get(pict)
                     if parent is not None:
                         parent.remove(pict)
@@ -534,35 +544,6 @@ def force_footer_size_10(root):
         set_run_props(r, size=10)
     set_dml_text_size(root, 10.0)
 
-# ───────────────────────── Réduction espaces avant tableaux ─────────
-def reduce_space_before_tables(root: ET.Element):
-    """
-    Élimine les paragraphes vides multiples juste avant chaque tableau.
-    Si plusieurs paragraphes vides précèdent un tableau, on ne conserve qu’un seul.
-    """
-    parent_map = {child: parent for parent in root.iter() for child in parent}
-    for tbl in root.findall(".//w:tbl", NS):
-        parent = parent_map.get(tbl)
-        if parent is None:
-            continue
-        children = list(parent)
-        try:
-            idx = children.index(tbl)
-        except ValueError:
-            continue
-        blanks = []
-        j = idx - 1
-        while j >= 0:
-            el = children[j]
-            if el.tag == f"{{{W}}}p" and not get_text(el).strip():
-                blanks.append(el)
-                j -= 1
-                continue
-            break
-        if len(blanks) > 1:
-            for b in blanks[:-1]:
-                parent.remove(b)
-
 # ───────────────────────── Processing DOCX ─────────────────────────
 def process_bytes(
     docx_bytes: bytes,
@@ -598,13 +579,13 @@ def process_bytes(
             tables_and_numbering(root)
             reposition_small_icon(root, icon_left, icon_top)
             remove_large_grey_rectangles(root, theme_colors)
-            reduce_space_before_tables(root)
 
         if name.startswith("word/footer"):
             force_footer_size_10(root)
 
         parts[name] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
+    # Légende optionnelle
     if legend_bytes and "word/document.xml" in parts and "word/_rels/document.xml.rels" in parts:
         parts["word/document.xml"] = remove_legend_text(parts["word/document.xml"])
         new_doc, new_rels, media = insert_legend_image(
