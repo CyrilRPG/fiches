@@ -1,5 +1,5 @@
 import io, zipfile, re, os, xml.etree.ElementTree as ET
-from typing import Dict, Tuple, List
+from typing import Dict, Tuple
 import streamlit as st
 
 # ------------- Namespaces & utils -------------
@@ -19,7 +19,6 @@ REPL    = "2025 - 2026"
 ROMAN_RE = re.compile(r"^\s*[IVXLC]+\s*[.)]?\s+.+", re.IGNORECASE)
 
 def cm_to_emu(cm: float) -> int:
-    # 1 cm ≈ 360000 EMU
     return int(round(cm * 360000))
 
 def get_text(p) -> str:
@@ -120,27 +119,42 @@ def tables_and_numbering(root):
         for tr in rows[1:]:
             for p in tr.findall(".//w:p", NS):
                 for r in p.findall(".//w:r", NS): set_run_props(r, size=9)
-
     # numérotation romaine : 10 / italic / bold / blanc
     for p in root.findall(".//w:p", NS):
         if ROMAN_RE.match(get_text(p).strip() or ""):
             for r in p.findall(".//w:r", NS):
                 set_run_props(r, size=10, bold=True, italic=True, color="FFFFFF")
-    # ⚠️ on NE met plus le paragraphe précédent en 12 gras → évite les faux positifs (ex. encadré jaune)
+    # (On ne touche pas au paragraphe précédent pour éviter les faux positifs)
 
 def build_parent_map(root):
     return {child: parent for parent in root.iter() for child in parent}
 
+# --- Helpers pour identifier les grands rectangles gris (#F2F2F2 ± tolérance)
+def hex_to_rgb(h: str) -> Tuple[int,int,int]:
+    h = h.strip().lstrip("#")
+    if len(h) == 6:
+        return int(h[0:2],16), int(h[2:4],16), int(h[4:6],16)
+    return (0,0,0)
+
+def is_close_grey(val: str, target="#F2F2F2", tol=10) -> bool:
+    try:
+        r,g,b   = hex_to_rgb(val.upper())
+        rt,gt,bt= hex_to_rgb(target)
+        return abs(r-rt)<=tol and abs(g-gt)<=tol and abs(b-bt)<=tol
+    except:
+        return False
+
 def remove_large_grey_rectangles(root):
-    """Supprime les grands rectangles gris (p. ex. #F2F2F2) y compris sur la page de garde.
-       Cible wp:anchor ET wp:inline ; retire le nœud w:drawing complet (préserve la mise en page)."""
-    GREYS = {"D9D9D9","E7E7E7","EEEEEE","F2F2F2","EDEDED","EFEFEF","DDDDDD","CCCCCC","F0F0F0"}
+    """
+    Supprime les grands rectangles gris (p. ex. #F2F2F2) de couverture.
+    Cible w:drawing -> (wp:anchor|wp:inline), y compris groupes.
+    """
     parent_map = build_parent_map(root)
 
     for drawing in root.findall(".//w:drawing", NS):
-        anchor = drawing.find(".//wp:anchor", NS)
-        inline = drawing.find(".//wp:inline", NS)
-        holder = anchor if anchor is not None else inline
+        holder = drawing.find(".//wp:anchor", NS)
+        if holder is None:
+            holder = drawing.find(".//wp:inline", NS)
         if holder is None:
             continue
 
@@ -152,14 +166,21 @@ def remove_large_grey_rectangles(root):
         except:
             continue
 
-        # couleurs présentes (solidFill -> srgbClr)
-        vals = [el.get("val","").upper() for el in holder.findall(".//a:srgbClr", NS)]
+        # Ignore images (pics). On vise des formes (rectangles).
+        has_pic = holder.find(".//pic:pic", NS) is not None
 
-        # grand bloc gris ? (≥ 5 cm et couleur dans GREYS)
-        if cx >= cm_to_emu(5) and cy >= cm_to_emu(5) and any(v in GREYS for v in vals):
+        # Couleurs (toutes occurrences d'un srgbClr)
+        srgb = [el.get("val","").upper() for el in holder.findall(".//a:srgbClr", NS)]
+        has_f2 = any(is_close_grey(v, "#F2F2F2", tol=12) for v in srgb)
+
+        # Géométrie rect ?
+        is_rect = holder.find(".//a:prstGeom[@prst='rect']", NS) is not None
+
+        # seuil "grand"
+        if (not has_pic) and (is_rect or has_f2) and (cx >= cm_to_emu(6)) and (cy >= cm_to_emu(8)) and has_f2:
             parent = parent_map.get(drawing)
             if parent is not None:
-                parent.remove(drawing)  # suppression totale du bloc
+                parent.remove(drawing)  # suppression du bloc gris
 
 def build_anchored_image(rId, width_cm, height_cm, left_cm, top_cm, name="Legende"):
     cx = cm_to_emu(width_cm); cy = cm_to_emu(height_cm)
@@ -248,9 +269,31 @@ def insert_legend_image(document_xml: bytes, rels_xml: bytes, image_bytes: bytes
         (f"word/{media_name}", image_bytes)
     )
 
+def reposition_small_icon(root, left_cm=15.3, top_cm=11.0):
+    """Déplace la 1ère petite image (icône écriture) en (15,3 cm ; 11 cm)."""
+    for anchor in root.findall(".//wp:anchor", NS):
+        extent = anchor.find("wp:extent", NS)
+        if extent is None: continue
+        try:
+            cx = int(extent.get("cx","0")); cy = int(extent.get("cy","0"))
+        except:
+            continue
+        # petite image (<= 3 cm)
+        if anchor.find(".//pic:pic", NS) is not None and cx <= cm_to_emu(3.0) and cy <= cm_to_emu(3.0):
+            posH = anchor.find("wp:positionH", NS) or ET.SubElement(anchor, f"{{{WP}}}positionH", {"relativeFrom":"page"})
+            for ch in list(posH): posH.remove(ch)
+            posH.set("relativeFrom","page")
+            ET.SubElement(posH, f"{{{WP}}}posOffset").text = str(cm_to_emu(left_cm))
+
+            posV = anchor.find("wp:positionV", NS) or ET.SubElement(anchor, f"{{{WP}}}positionV", {"relativeFrom":"page"})
+            for ch in list(posV): posV.remove(ch)
+            posV.set("relativeFrom","page")
+            ET.SubElement(posV, f"{{{WP}}}posOffset").text = str(cm_to_emu(top_cm))
+            break
+
 def process_bytes(docx_bytes: bytes,
                   legend_bytes: bytes = None,
-                  icon_left=15.5, icon_top=11.0,
+                  icon_left=15.3, icon_top=11.0,
                   legend_left=2.25, legend_top=25.0,
                   legend_w=4.91, legend_h=3.66) -> bytes:
     # unzip
@@ -270,7 +313,8 @@ def process_bytes(docx_bytes: bytes,
         if name == "word/document.xml":
             cover_sizes_cleanup(root)
             tables_and_numbering(root)
-            # supprime le grand rectangle gris (#F2F2F2) de la couverture
+            # nouveau : reposition icône + suppression rectangle gris (#F2F2F2)
+            reposition_small_icon(root, icon_left, icon_top)
             remove_large_grey_rectangles(root)
         parts[name] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
@@ -299,6 +343,8 @@ st.caption("Transforme tes .docx en préservant 100% du design et en appliquant 
 
 with st.sidebar:
     st.subheader("Paramètres (cm)")
+    icon_left  = st.number_input("Icône écriture — gauche", value=15.3, step=0.1)
+    icon_top   = st.number_input("Icône écriture — haut",   value=11.0, step=0.1)
     legend_left= st.number_input("Image Légendes — gauche", value=2.25, step=0.1)
     legend_top = st.number_input("Image Légendes — haut",   value=25.0, step=0.1)
     legend_w   = st.number_input("Image Légendes — largeur",value=4.91, step=0.01)
@@ -320,6 +366,7 @@ if st.button("⚙️ Lancer le traitement", type="primary", disabled=not files):
                 out_bytes = process_bytes(
                     up.read(),
                     legend_bytes=legend_bytes,
+                    icon_left=icon_left, icon_top=icon_top,
                     legend_left=legend_left, legend_top=legend_top,
                     legend_w=legend_w, legend_h=legend_h
                 )
