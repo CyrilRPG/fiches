@@ -236,111 +236,6 @@ def tables_and_numbering(root):
             for r in p.findall(".//w:r", NS):
                 set_run_props(r, size=10, bold=True, italic=True, color="FFFFFF")
 
-# ───────────────────────── Suppression rectangle gris couverture ───
-def build_parent_map(root): return {child: parent for parent in root.iter() for child in parent}
-def hex_to_rgb(h): h = h.strip().lstrip("#"); return (int(h[0:2],16),int(h[2:4],16),int(h[4:6],16)) if len(h)==6 else (0,0,0)
-def is_close_grey(val, target="#F2F2F2", tol=16):
-    try:
-        r,g,b   = hex_to_rgb(val.upper()); rt,gt,bt = hex_to_rgb(target)
-        return abs(r-rt)<=tol and abs(g-gt)<=tol and abs(b-bt)<=tol
-    except: return False
-
-def extract_theme_colors(parts: Dict[str, bytes]) -> Dict[str, str]:
-    data = parts.get("word/theme/theme1.xml")
-    if not data: return {}
-    try: root = ET.fromstring(data)
-    except ET.ParseError: return {}
-    colors = {}
-    cs = root.find(".//a:clrScheme", NS)
-    if cs is None: return colors
-    for el in list(cs):
-        tag = re.sub(r"{.*}", "", el.tag)
-        srgb = el.find("a:srgbClr", NS)
-        if srgb is not None:
-            colors[tag.lower()] = srgb.get("val", "").upper()
-        else:
-            sys = el.find("a:sysClr", NS)
-            if sys is not None:
-                colors[tag.lower()] = sys.get("lastClr", "").upper()
-    return colors
-
-def looks_like_cover_shape(holder):
-    # position verticale (par rapport à la page) < 20 cm ≈ zone de couverture
-    posV = holder.find("wp:positionV/wp:posOffset", NS)
-    if posV is None: return True
-    try:  return emu_to_cm(int(posV.text)) < 20.0
-    except: return True
-
-def remove_large_grey_rectangles(root, theme_colors: Dict[str, str]):
-    """
-    Supprime UNIQUEMENT le grand rectangle gris clair de la page de garde.
-    """
-    parent_map = build_parent_map(root)
-
-    # DrawingML
-    for drawing in root.findall(".//w:drawing", NS):
-        holder = drawing.find(".//wp:anchor", NS) or drawing.find(".//wp:inline", NS)
-        if holder is None: continue
-        extent = holder.find("wp:extent", NS)
-        if extent is None: continue
-        try:
-            cx = int(extent.get("cx","0")); cy = int(extent.get("cy","0"))
-        except: continue
-
-        has_pic = holder.find(".//pic:pic", NS) is not None
-        x_cm, y_cm = holder_pos_cm(holder)
-
-        # couleurs (srgb + scheme corrigées par lumMod/lumOff)
-        srgb = [el.get("val","").upper() for el in holder.findall(".//a:srgbClr", NS)]
-        for sc in holder.findall(".//a:schemeClr", NS):
-            base = theme_colors.get(sc.get("val","").lower())
-            if not base: continue
-            r,g,b = hex_to_rgb(base)
-            lm = sc.find("a:lumMod", NS); lo = sc.find("a:lumOff", NS)
-            mod = int(lm.get("val","100000"))/100000 if lm is not None else 1.0
-            off = int(lo.get("val","0"))/100000 if lo is not None else 0.0
-            r = min(255, int(r*mod + 255*off))
-            g = min(255, int(g*mod + 255*off))
-            b = min(255, int(b*mod + 255*off))
-            srgb.append(f"{r:02X}{g:02X}{b:02X}")
-
-        looks_f2 = any(is_close_grey(v, "#F2F2F2", 16) for v in srgb)
-        is_rect  = holder.find(".//a:prstGeom[@prst='rect']", NS) is not None \
-                or holder.find(".//a:prstGeom[@prst='roundRect']", NS) is not None
-
-        big_on_cover     = looks_like_cover_shape(holder) and cx >= cm_to_emu(6)  and cy >= cm_to_emu(8)
-        very_big_anywhere=                         cx >= cm_to_emu(10) and cy >= cm_to_emu(12)
-        right_half       = x_cm >= 9.0  # approx milieu de page A4 paysage/portrait
-
-        if (not has_pic) and is_rect and (
-            (looks_f2 and (big_on_cover or right_half)) or very_big_anywhere
-        ):
-            parent = parent_map.get(drawing)
-            if parent is not None:
-                parent.remove(drawing)
-
-    # VML hérité
-    for pict in root.findall(".//w:pict", NS):
-        for tag in ("rect","roundrect","shape"):
-            for shape in pict.findall(f".//v:{tag}", NS):
-                fill = (shape.get("fillcolor","") or "").upper()
-                style = shape.get("style","")
-                m_w = re.search(r"width:([0-9.]+)cm", style)
-                m_h = re.search(r"height:([0-9.]+)cm", style)
-                m_l = re.search(r"left:([0-9.]+)cm", style)
-                if not (m_w and m_h): 
-                    continue
-                w = float(m_w.group(1)); h = float(m_h.group(1))
-                left_cm = float(m_l.group(1)) if m_l else 0.0
-                big_on_cover = (w >= 6 and h >= 8)
-                very_big_anywhere = (w >= 10 and h >= 12)
-                right_half = left_cm >= 9.0
-                looks_f2 = is_close_grey(fill, "#F2F2F2", 18)  # un peu plus tolérant
-                if ((looks_f2 and (big_on_cover or right_half)) or very_big_anywhere):
-                    parent = parent_map.get(pict)
-                    if parent is not None:
-                        parent.remove(pict)
-
 # ───────────────────────── Légende (optionnelle) ───────────────────
 def build_anchored_image(rId, width_cm, height_cm, left_cm, top_cm, name="Legende"):
     cx, cy = cm_to_emu(width_cm), cm_to_emu(height_cm)
@@ -364,7 +259,7 @@ def build_anchored_image(rId, width_cm, height_cm, left_cm, top_cm, name="Legend
     graphic = ET.SubElement(anchor, f"{{{A}}}graphic")
     gData = ET.SubElement(graphic, f"{{{A}}}graphicData", {"uri":"http://schemas.openxmlformats.org/drawingml/2006/picture"})
     pic = ET.SubElement(gData, f"{{{PIC}}}pic")
-    nvPicPr = ET.SubElement(pic, f"{{{PIC}}}nvPicPr")
+    nvPicPr = ET.SubElement(pic, f"{{{PIC}}}nvPicPr"})
     ET.SubElement(nvPicPr, f"{{{PIC}}}cNvPr", {"id":"0","name":name+".img"})
     ET.SubElement(nvPicPr, f"{{{PIC}}}cNvPicPr")
     blipFill = ET.SubElement(pic, f"{{{PIC}}}blipFill")
@@ -386,7 +281,6 @@ def remove_legend_text(document_xml: bytes) -> bytes:
     for p in root.findall(".//w:p", NS):
         if get_text(p).strip() in lines:
             for t in p.findall(".//w:t", NS): t.text = ""
-            # on ne touche pas aux <w:drawing> ici pour éviter des incohérences de rels
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 def insert_legend_image(document_xml: bytes, rels_xml: bytes, image_bytes: bytes,
@@ -473,7 +367,6 @@ def process_bytes(docx_bytes: bytes,
 
     with zipfile.ZipFile(io.BytesIO(docx_bytes), "r") as zin:
         parts: Dict[str, bytes] = {n: zin.read(n) for n in zin.namelist()}
-    theme_colors = extract_theme_colors(parts)
 
     for name, data in list(parts.items()):
         if not name.endswith(".xml"): continue
@@ -490,7 +383,7 @@ def process_bytes(docx_bytes: bytes,
             tune_cover_shapes_spatial(root)     # formes (spatial + robuste)
             tables_and_numbering(root)
             reposition_small_icon(root, icon_left, icon_top)
-            remove_large_grey_rectangles(root, theme_colors)  # SEULEMENT la grande boîte de couv
+            # ⚠️ plus aucune suppression du panneau gris ici
 
         if name.startswith("word/footer"):
             force_footer_size_10(root)
