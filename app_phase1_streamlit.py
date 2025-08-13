@@ -151,10 +151,10 @@ def cover_sizes_cleanup(root):
     """
     Applique les tailles spécifiques aux paragraphes de la couverture.
 
-    - Les paragraphes contenant « Fiche de cours » sont mis en 22 pt.
-    - La ligne suivant immédiatement une ligne « Fiche de cours » non vide est mise en 20 pt (nom du cours).
-    - Les paragraphes contenant « université » et l’une des années cibles sont mis en 10 pt.
-    - Le texte « ACTUALISATION » est supprimé.
+    - « Fiche de cours … » → 22 pt
+    - Ligne immédiatement après une « Fiche de cours … » non vide → 20 pt
+    - Paragraphes contenant « université » et l’une des années cibles → 10 pt
+    - Suppression du mot ACTUALISATION
     """
     paras = root.findall(".//w:p", NS)
     texts = [get_text(p).strip() for p in paras]
@@ -187,18 +187,17 @@ def cover_sizes_cleanup(root):
         ):
             set_size(paras[i], 10)
 
-        # On ne modifie plus la taille des paragraphes contenant « PLAN » ni des éléments du plan.
+        # Pas de modification de taille pour les titres/éléments du plan.
 
 # ───────────────────────── Couverture : formes DML/WPS (spatial) ──
 def tune_cover_shapes_spatial(root):
     """
-    Prend toutes les formes (anchor/inline), lit leur texte et position (x, y),
-    puis applique les règles suivantes :
+    Traite toutes les formes (anchors/inline) de la page de garde et applique :
 
-    - Les formes contenant « Fiche de cours … » sont mises en 22 pt.
-    - La première forme non vide suivant une forme « Fiche de cours … » est mise en 20 pt.
-    - Les formes contenant « université » et l’une des années ciblées sont mises en 10 pt.
-    - Aucune modification de taille n’est appliquée aux titres ou éléments du plan.
+    - « Fiche de cours … » → 22 pt
+    - Première forme non vide après « Fiche de cours … » → 20 pt
+    - Formes contenant « université » et une année ciblée → 10 pt
+    - Pas de modification de taille sur « PLAN » ou ses éléments
     """
     holders = []
     for holder in root.findall(".//wp:anchor", NS) + root.findall(".//wp:inline", NS):
@@ -221,7 +220,7 @@ def tune_cover_shapes_spatial(root):
         ):
             set_tx_size(h, 10.0)
 
-    # Fiche de cours (22) + cours (20)
+    # « Fiche de cours … » et cours (22 puis 20)
     idx_fiche = None
     for i, (_, _, h, txt) in enumerate(holders):
         if "fiche de cours" in txt.lower():
@@ -235,9 +234,7 @@ def tune_cover_shapes_spatial(root):
                 set_tx_size(holders[j][2], 20.0)
                 break
 
-    # On ne modifie plus la taille du plan.
-
-    # supprimer le mot « ACTUALISATION » dans toutes les formes
+    # suppression du texte ACTUALISATION dans les formes
     for _, _, h, _ in holders:
         tx = h.find(".//a:txBody", NS)
         if tx is not None:
@@ -268,7 +265,7 @@ def tables_and_numbering(root):
             for r in p.findall(".//w:r", NS):
                 set_run_props(r, size=10, bold=True, italic=True, color="FFFFFF")
 
-# ───────────────────────── Couverture : suppression rectangle gris ─
+# ───────────────────────── Suppression rectangle gris ──────────────
 def extract_theme_colors(parts: Dict[str, bytes]) -> Dict[str, str]:
     data = parts.get("word/theme/theme1.xml")
     if not data:
@@ -443,8 +440,8 @@ def insert_legend_image(
     document_xml: bytes,
     rels_xml: bytes,
     image_bytes: bytes,
-    left_cm=2.25,
-    top_cm=25.0,
+    left_cm=2.3,
+    top_cm=23.8,
     width_cm=5.68,
     height_cm=3.77,
 ) -> Tuple[bytes, bytes, Tuple[str, bytes]]:
@@ -537,14 +534,43 @@ def force_footer_size_10(root):
         set_run_props(r, size=10)
     set_dml_text_size(root, 10.0)
 
+# ───────────────────────── Réduction espaces avant tableaux ─────────
+def reduce_space_before_tables(root: ET.Element):
+    """
+    Élimine les paragraphes vides multiples juste avant chaque tableau.
+    Si plusieurs paragraphes vides précèdent un tableau, on ne conserve qu’un seul.
+    """
+    parent_map = {child: parent for parent in root.iter() for child in parent}
+    for tbl in root.findall(".//w:tbl", NS):
+        parent = parent_map.get(tbl)
+        if parent is None:
+            continue
+        children = list(parent)
+        try:
+            idx = children.index(tbl)
+        except ValueError:
+            continue
+        blanks = []
+        j = idx - 1
+        while j >= 0:
+            el = children[j]
+            if el.tag == f"{{{W}}}p" and not get_text(el).strip():
+                blanks.append(el)
+                j -= 1
+                continue
+            break
+        if len(blanks) > 1:
+            for b in blanks[:-1]:
+                parent.remove(b)
+
 # ───────────────────────── Processing DOCX ─────────────────────────
 def process_bytes(
     docx_bytes: bytes,
     legend_bytes: bytes = None,
     icon_left=15.3,
     icon_top=11.0,
-    legend_left=2.25,
-    legend_top=25.0,
+    legend_left=2.3,
+    legend_top=23.8,
     legend_w=5.68,
     legend_h=3.77,
 ) -> bytes:
@@ -572,6 +598,7 @@ def process_bytes(
             tables_and_numbering(root)
             reposition_small_icon(root, icon_left, icon_top)
             remove_large_grey_rectangles(root, theme_colors)
+            reduce_space_before_tables(root)
 
         if name.startswith("word/footer"):
             force_footer_size_10(root)
@@ -618,8 +645,8 @@ with st.sidebar:
     st.subheader("Paramètres (cm)")
     icon_left  = st.number_input("Icône écriture — gauche", value=15.3, step=0.1)
     icon_top   = st.number_input("Icône écriture — haut",   value=11.0, step=0.1)
-    legend_left= st.number_input("Image Légendes — gauche", value=2.25, step=0.1)
-    legend_top = st.number_input("Image Légendes — haut",   value=25.0, step=0.1)
+    legend_left= st.number_input("Image Légendes — gauche", value=2.3, step=0.1)
+    legend_top = st.number_input("Image Légendes — haut",   value=23.8, step=0.1)
     legend_w   = st.number_input("Image Légendes — largeur",value=5.68, step=0.01)
     legend_h   = st.number_input("Image Légendes — hauteur",value=3.77, step=0.01)
 
