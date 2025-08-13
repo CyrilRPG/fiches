@@ -368,7 +368,7 @@ def reposition_small_icon(root, left_cm=15.3, top_cm=11.0):
     anchor = chosen[2]
 
     # repositionnement exact
-    posH = anchor.find("wp:positionH", NS) or ET.SubElement(anchor, f"{{{WP}}}positionH"})
+    posH = anchor.find("wp:positionH", NS) or ET.SubElement(anchor, f"{{{WP}}}positionH")
     for ch in list(posH): posH.remove(ch)
     posH.set("relativeFrom","page"); ET.SubElement(posH, f"{{{WP}}}posOffset").text = str(cm_to_emu(left_cm))
     posV = anchor.find("wp:positionV", NS) or ET.SubElement(anchor, f"{{{WP}}}positionV"})
