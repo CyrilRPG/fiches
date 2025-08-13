@@ -112,7 +112,7 @@ def force_calibri(root):
     for r in root.findall(".//w:r", NS):
         set_run_props(r, calibri=True)
 
-# ── recoloration texte rouge/bleu → noir (tel que demandé précédemment)
+# ── recoloration texte rouge/bleu → noir
 def red_to_black(root):
     RED_HEX = {
         "FF0000","C00000","CC0000","E60000","ED1C24","F44336","DC143C","B22222","E74C3C","D0021B"
@@ -153,16 +153,11 @@ def red_to_black(root):
 
 # ── 1) Puces rouges → noires : numbering.xml
 def force_red_bullets_black_in_numbering(root):
-    """
-    Met en noir les couleurs des symboles de liste définies dans word/numbering.xml
-    (w:lvl/w:rPr/w:color) si elles sont rouges.
-    """
     RED_HEX = {"FF0000","C00000","CC0000","E60000","ED1C24","F44336","DC143C","B22222","E74C3C","D0021B"}
     def looks_red(rgb: Tuple[int,int,int]) -> bool:
         if not rgb: return False
         r,g,b = rgb
         return (r >= 170 and g <= 110 and b <= 110)
-
     for col in root.findall(".//w:lvl//w:rPr/w:color", NS):
         val = (col.get(f"{{{W}}}val") or "").strip().upper()
         make_black = False
@@ -180,17 +175,12 @@ def force_red_bullets_black_in_numbering(root):
 
 # ── 2) Puces rouges → noires : styles de liste (styles.xml)
 def force_red_bullets_black_in_styles(root):
-    """
-    Corrige les styles de liste (ex: List Paragraph, Puces, Bullet…).
-    Si un style de paragraphe 'liste' définit w:rPr/w:color rouge, on force noir.
-    """
     CANDIDATES = {"list","bullet","puce","puces","liste"}
     RED_HEX = {"FF0000","C00000","CC0000","E60000","ED1C24","F44336","DC143C","B22222","E74C3C","D0021B"}
     def looks_red(rgb: Tuple[int,int,int]) -> bool:
         if not rgb: return False
         r,g,b = rgb
         return (r >= 170 and g <= 110 and b <= 110)
-
     for st in root.findall(".//w:style[@w:type='paragraph']", NS):
         name_el = st.find("w:name", NS)
         style_id = (st.get(f"{{{W}}}styleId") or "").lower()
@@ -216,20 +206,20 @@ def force_red_bullets_black_in_styles(root):
                 col.attrib.pop(f"{{{W}}}{a}", None)
 
 # ── 3) Puces rouges → noires : au niveau des paragraphes numérotés (document.xml)
+#     (⚠️ correction : PAS de prédicat XPath — on filtre en Python)
 def force_red_bullets_black_in_paragraphs(root):
-    """
-    Pour chaque w:p qui a w:numPr (liste), si le paragraphe porte un w:pPr/w:rPr/w:color rouge,
-    on force le noir. N'altère pas la couleur des runs ayant déjà leur propre w:color.
-    """
     RED_HEX = {"FF0000","C00000","CC0000","E60000","ED1C24","F44336","DC143C","B22222","E74C3C","D0021B"}
     def looks_red(rgb: Tuple[int,int,int]) -> bool:
         if not rgb: return False
         r,g,b = rgb
         return (r >= 170 and g <= 110 and b <= 110)
 
-    for p in root.findall(".//w:p[w:pPr/w:numPr]", NS):
+    for p in root.findall(".//w:p", NS):
         pPr = p.find("w:pPr", NS)
         if pPr is None:
+            continue
+        # paragraphe en liste ?
+        if pPr.find("w:numPr", NS) is None:
             continue
         rPr = pPr.find("w:rPr", NS)
         if rPr is None:
@@ -676,7 +666,7 @@ def process_bytes(
         replace_years(root)
         strip_actualisation_everywhere(root)
         force_calibri(root)
-        red_to_black(root)  # texte rouge/bleu → noir (comme avant)
+        red_to_black(root)  # texte rouge/bleu → noir
 
         if name == "word/document.xml":
             cover_sizes_cleanup(root)
@@ -691,7 +681,7 @@ def process_bytes(
         if name == "word/numbering.xml":
             force_red_bullets_black_in_numbering(root)
 
-        # 2) Styles : puces rouges -> noires sur styles de liste
+        # 2) Styles : puces rouges -> noires
         if name == "word/styles.xml":
             force_red_bullets_black_in_styles(root)
 
