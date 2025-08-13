@@ -19,6 +19,7 @@ ROMAN_RE = re.compile(r"^\s*[IVXLC]+\s*[.)]?\s+.+", re.IGNORECASE)
 
 # ---------- Utils ----------
 def cm_to_emu(cm: float) -> int: return int(round(cm * 360000))
+def emu_to_cm(emu: int) -> float: return emu/360000.0
 def get_text(p) -> str: return "".join(t.text or "" for t in p.findall(".//w:t", NS))
 
 def set_run_props(run, size=None, bold=None, italic=None, color=None, calibri=False):
@@ -42,9 +43,15 @@ def set_run_props(run, size=None, bold=None, italic=None, color=None, calibri=Fa
         (rPr.find("w:color", NS) or ET.SubElement(rPr, f"{{{W}}}color")).set(f"{{{W}}}val", color)
 
 def set_dml_text_size(root, pt: float):
-    """Fixe la taille des textes DrawingML (a:r) en pt*100 (ex: 10pt -> 1000)."""
+    """Fixe la taille des textes DrawingML (a:r) en pt*100."""
     val = str(int(round(pt*100)))
     for r in root.findall(".//a:r", NS):
+        rPr = r.find("a:rPr", NS) or ET.SubElement(r, f"{{{A}}}rPr")
+        rPr.set("sz", val)
+
+def set_dml_text_size_in_txbody(txbody, pt: float):
+    val = str(int(round(pt*100)))
+    for r in txbody.findall(".//a:r", NS):
         rPr = r.find("a:rPr", NS) or ET.SubElement(r, f"{{{A}}}rPr")
         rPr.set("sz", val)
 
@@ -82,24 +89,16 @@ def cover_sizes_cleanup(root):
     def set_size(p, pt):  [set_run_props(r, size=pt) for r in p.findall(".//w:r", NS)]
     for i,txt in enumerate(texts):
         low = txt.lower()
-        if "fiche de cours" in low:
-            set_size(paras[i], 22)
-            j=i-1
-            while j>=0 and not texts[j].strip(): j-=1
-            if j>=0: set_size(paras[j], 18)  # matière
-            k=i+1
-            while k < len(texts) and not texts[k].strip(): k+=1
-            if k < len(texts): set_size(paras[k], 20)  # titre du cours
-        if "université" in low and (any(x.replace("\u00A0"," ") in txt.replace("\u00A0"," ") for x in TARGETS+[REPL])):
-            set_size(paras[i], 10)
+        if "fiche de cours" in low: set_size(paras[i], 22)
+        if "université" in low and (any(x.replace("\u00A0"," ") in txt.replace("\u00A0"," ") for x in TARGETS+[REPL])): set_size(paras[i], 10)
+        if "introduction" in low and "biologie" in low: set_size(paras[i], 20)
         if txt.strip().upper() == "ACTUALISATION":
             for t in paras[i].findall(".//w:t", NS):
                 if t.text: t.text = re.sub(r"(?i)ACTUALISATION","",t.text)
-        if txt.strip().upper() == "PLAN":
-            set_size(paras[i], 11)
+        if txt.strip().upper() == "PLAN": set_size(paras[i], 11)
 
 def tables_and_numbering(root):
-    # titre de tableau (1ʳᵉ ligne) 12 gras ; reste 9
+    # titre de tableau 12 gras ; reste 9
     for tbl in root.findall(".//w:tbl", NS):
         rows = tbl.findall(".//w:tr", NS)
         if not rows: continue
@@ -108,7 +107,7 @@ def tables_and_numbering(root):
         for tr in rows[1:]:
             for p in tr.findall(".//w:p", NS):
                 for r in p.findall(".//w:r", NS): set_run_props(r, size=9)
-    # numérotation romaine → 10 / italique / gras / blanc
+    # numérotation romaine → 10 / italic / gras / blanc
     for p in root.findall(".//w:p", NS):
         if ROMAN_RE.match(get_text(p).strip() or ""):
             for r in p.findall(".//w:r", NS):
@@ -117,16 +116,26 @@ def tables_and_numbering(root):
 # ---------- Grey cover rectangle removal ----------
 def build_parent_map(root): return {child: parent for parent in root.iter() for child in parent}
 def hex_to_rgb(h): h=h.strip().lstrip("#"); return (int(h[0:2],16),int(h[2:4],16),int(h[4:6],16)) if len(h)==6 else (0,0,0)
-def is_close_grey(val, target="#F2F2F2", tol=12):
+def is_close_grey(val, target="#F2F2F2", tol=14):
     try:
         r,g,b   = hex_to_rgb(val.upper()); rt,gt,bt = hex_to_rgb(target)
         return abs(r-rt)<=tol and abs(g-gt)<=tol and abs(b-bt)<=tol
     except: return False
 
+def looks_like_cover_shape(holder):
+    # Heuristique : position verticale < 20 cm => page de garde typique
+    posV = holder.find("wp:positionV/wp:posOffset", NS)
+    if posV is None: return True
+    try:
+        ycm = emu_to_cm(int(posV.text))
+        return ycm < 20.0
+    except:
+        return True
+
 def remove_large_grey_rectangles(root):
     """
     Supprime les grands rectangles gris (#F2F2F2 ± tolérance) de la couverture,
-    même s'ils sont en groupe et même en schemeClr (bg1, lt1, tx1).
+    même s'ils sont en groupe et même en schemeClr (bg1, lt1, tx1) avec lumMod/lumOff.
     """
     parent_map = build_parent_map(root)
     for drawing in root.findall(".//w:drawing", NS):
@@ -139,13 +148,16 @@ def remove_large_grey_rectangles(root):
         except: continue
 
         has_pic = holder.find(".//pic:pic", NS) is not None
+
         # couleurs possibles
         srgb = [el.get("val","").upper() for el in holder.findall(".//a:srgbClr", NS)]
         scheme_vals = [el.get("val","").lower() for el in holder.findall(".//a:schemeClr", NS)]
-        looks_f2 = any(is_close_grey(v, "#F2F2F2", 14) for v in srgb) or any(v in ("bg1","lt1","tx1") for v in scheme_vals)
+        looks_f2 = any(is_close_grey(v, "#F2F2F2", 16) for v in srgb) or any(v in ("bg1","lt1","tx1") for v in scheme_vals)
+
+        # rectangle ?
         is_rect = holder.find(".//a:prstGeom[@prst='rect']", NS) is not None
 
-        if (not has_pic) and (is_rect or looks_f2) and cx >= cm_to_emu(6) and cy >= cm_to_emu(8) and looks_f2:
+        if (not has_pic) and looks_like_cover_shape(holder) and (is_rect or looks_f2) and cx >= cm_to_emu(6) and cy >= cm_to_emu(8) and looks_f2:
             parent = parent_map.get(drawing)
             if parent is not None: parent.remove(drawing)
 
@@ -245,12 +257,24 @@ def reposition_small_icon(root, left_cm=15.3, top_cm=11.0):
 
 # ---------- Footer normalization (10pt) ----------
 def force_footer_size_10(root):
-    """Met tout le texte du pied de page en 10 pt (w:r et a:r)."""
-    # w:r
-    for r in root.findall(".//w:r", NS):
-        set_run_props(r, size=10)
-    # DML
+    for r in root.findall(".//w:r", NS): set_run_props(r, size=10)
     set_dml_text_size(root, 10.0)
+
+# ---------- DML cover text sizing ----------
+def tune_cover_dml_textsizes(root):
+    """Force tailles DML sur la couverture uniquement (université 10, fiche 22, intro 20)."""
+    for holder in root.findall(".//wp:anchor", NS) + root.findall(".//wp:inline", NS):
+        if not looks_like_cover_shape(holder): continue
+        tx = holder.find(".//a:txBody", NS)
+        if tx is None: continue
+        full = "".join(t.text or "" for t in tx.findall(".//a:t", NS)).lower()
+        if not full.strip(): continue
+        if "universite" in full or "université" in full:
+            set_dml_text_size_in_txbody(tx, 10.0)
+        elif "fiche de cours" in full:
+            set_dml_text_size_in_txbody(tx, 22.0)
+        elif "introduction" in full and "biologie" in full:
+            set_dml_text_size_in_txbody(tx, 20.0)
 
 # ---------- Pipeline ----------
 def process_bytes(docx_bytes: bytes,
@@ -272,12 +296,12 @@ def process_bytes(docx_bytes: bytes,
         red_to_black(root)
 
         if name == "word/document.xml":
-            cover_sizes_cleanup(root)
+            cover_sizes_cleanup(root)           # w:p tailles (déjà en place)
+            tune_cover_dml_textsizes(root)      # NEW : tailles DML (formes)
             tables_and_numbering(root)
             reposition_small_icon(root, icon_left, icon_top)
             remove_large_grey_rectangles(root)
 
-        # pieds de page → 10 pt
         if name.startswith("word/footer"):
             force_footer_size_10(root)
 
