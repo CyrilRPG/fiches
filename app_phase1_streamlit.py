@@ -176,7 +176,7 @@ def build_anchored_image(rId, width_cm, height_cm, left_cm, top_cm, name="Legend
     ET.SubElement(anchor, f"{{{WP}}}effectExtent", {"l":"0","t":"0","r":"0","b":"0"})
     ET.SubElement(anchor, f"{{{WP}}}wrapNone")
     ET.SubElement(anchor, f"{{{WP}}}docPr", {"id":"10","name":name})
-    ET.SubElement(anchor, f"{{{WP}}}cNvGraphicFramePr")   # <-- corrigé
+    ET.SubElement(anchor, f"{{{WP}}}cNvGraphicFramePr")   # corrigé
     graphic = ET.SubElement(anchor, f"{{{A}}}graphic")
     gData   = ET.SubElement(graphic, f"{{{A}}}graphicData", {"uri":"http://schemas.openxmlformats.org/drawingml/2006/picture"})
     pic     = ET.SubElement(gData, f"{{{PIC}}}pic")
@@ -184,8 +184,7 @@ def build_anchored_image(rId, width_cm, height_cm, left_cm, top_cm, name="Legend
     ET.SubElement(nvPicPr, f"{{{PIC}}}cNvPr", {"id":"0","name":name+".img"})
     ET.SubElement(nvPicPr, f"{{{PIC}}}cNvPicPr")
     blipFill= ET.SubElement(pic, f"{{{PIC}}}blipFill")
-    # on injecte directement le rId ici (pas de placeholder)
-    ET.SubElement(blipFill, f"{{{A}}}blip", {f"{{{R}}}embed": rId})
+    ET.SubElement(blipFill, f"{{{A}}}blip", {f"{{{R}}}embed": rId})  # rId injecté directement
     stretch = ET.SubElement(blipFill, f"{{{A}}}stretch"); ET.SubElement(stretch, f"{{{A}}}fillRect")
     spPr    = ET.SubElement(pic, f"{{{PIC}}}spPr")
     xfrm    = ET.SubElement(spPr, f"{{{A}}}xfrm")
@@ -329,6 +328,11 @@ if st.button("⚙️ Lancer le traitement", type="primary", disabled=not files):
                 )
                 out_name = up.name.replace(".docx", "") + "_PHASE1_ULTIME.docx"
                 st.success(f"✅ Terminé : {up.name}")
-                st.download_button("⬇️ Télécharger " + out_name, data=out_bytes, file_name=out_name, mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+                st.download_button(
+                    "⬇️ Télécharger " + out_name,
+                    data=out_bytes,
+                    file_name=out_name,
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                )
             except Exception as e:
                 st.error(f"❌ Échec pour {up.name} : {e}")
