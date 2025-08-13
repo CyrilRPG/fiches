@@ -9,8 +9,9 @@ A  = "http://schemas.openxmlformats.org/drawingml/2006/main"
 PIC= "http://schemas.openxmlformats.org/drawingml/2006/picture"
 R  = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 P_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
+WPS = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
 
-NS = {"w":W, "wp":WP, "a":A, "pic":PIC, "r":R}
+NS = {"w":W, "wp":WP, "a":A, "pic":PIC, "r":R, "wps":WPS}
 for k,v in NS.items(): ET.register_namespace(k, v)
 
 TARGETS = ["2024-2025","2024 - 2025","2024\u00A0-\u00A02025"]
@@ -117,13 +118,35 @@ def is_close_grey(val, target="#F2F2F2", tol=16):
         return abs(r-rt)<=tol and abs(g-gt)<=tol and abs(b-bt)<=tol
     except: return False
 
+def extract_theme_colors(parts: Dict[str, bytes]) -> Dict[str, str]:
+    """Retourne un mapping schemeClr -> sRGB à partir du thème, si disponible."""
+    data = parts.get("word/theme/theme1.xml")
+    if not data: return {}
+    try:
+        root = ET.fromstring(data)
+    except ET.ParseError:
+        return {}
+    colors = {}
+    cs = root.find(".//a:clrScheme", NS)
+    if cs is None: return colors
+    for el in list(cs):
+        tag = re.sub(r"{.*}", "", el.tag)
+        srgb = el.find("a:srgbClr", NS)
+        if srgb is not None:
+            colors[tag.lower()] = srgb.get("val", "").upper()
+        else:
+            sys = el.find("a:sysClr", NS)
+            if sys is not None:
+                colors[tag.lower()] = sys.get("lastClr", "").upper()
+    return colors
+
 def looks_like_cover_shape(holder):
     posV = holder.find("wp:positionV/wp:posOffset", NS)
     if posV is None: return True
     try:  return emu_to_cm(int(posV.text)) < 20.0
     except: return True
 
-def remove_large_grey_rectangles(root):
+def remove_large_grey_rectangles(root, theme_colors: Dict[str, str]):
     """
     Supprime les grands rectangles gris (#F2F2F2 ± tolérance) de la page de garde,
     y compris 'roundRect', inline/anchor et groupes. Si la forme est très grande
@@ -143,13 +166,25 @@ def remove_large_grey_rectangles(root):
 
         # couleurs
         srgb = [el.get("val","").upper() for el in holder.findall(".//a:srgbClr", NS)]
-        scheme_vals = [el.get("val","").lower() for el in holder.findall(".//a:schemeClr", NS)]
-        looks_f2 = any(is_close_grey(v, "#F2F2F2", 16) for v in srgb) or any(v in ("bg1","lt1","tx1") for v in scheme_vals)
+        for sc in holder.findall(".//a:schemeClr", NS):
+            val = sc.get("val", "").lower()
+            base = theme_colors.get(val)
+            if not base: continue
+            r, g, b = hex_to_rgb(base)
+            lm = sc.find("a:lumMod", NS); lo = sc.find("a:lumOff", NS)
+            mod = int(lm.get("val", "100000")) / 100000 if lm is not None else 1.0
+            off = int(lo.get("val", "0")) / 100000 if lo is not None else 0.0
+            r = min(255, int(r * mod + 255 * off))
+            g = min(255, int(g * mod + 255 * off))
+            b = min(255, int(b * mod + 255 * off))
+            srgb.append(f"{r:02X}{g:02X}{b:02X}")
+        looks_f2 = any(is_close_grey(v, "#F2F2F2", 16) for v in srgb)
 
         # rectangle (rect / roundRect)
         is_rect = holder.find(".//a:prstGeom[@prst='rect']", NS) is not None \
                or holder.find(".//a:prstGeom[@prst='roundRect']", NS) is not None
 
+        if (not has_pic) and looks_like_cover_shape(holder) and is_rect and cx >= cm_to_emu(6) and cy >= cm_to_emu(8) and looks_f2:
         big_on_cover = looks_like_cover_shape(holder) and cx >= cm_to_emu(6) and cy >= cm_to_emu(8)
         very_big_anywhere = cx >= cm_to_emu(10) and cy >= cm_to_emu(10)
 
@@ -278,6 +313,21 @@ def tune_cover_dml_textsizes(root):
         elif ("introduction" in text) and ("biologie" in text):
             set_dml_text_size_in_txbody(tx, 20.0)
 
+def tune_cover_wps_textsizes(root):
+    """Force tailles des zones de texte WPS sur la couverture (université 10, fiche 22, intro 20)."""
+    for holder in root.findall(".//wp:anchor", NS) + root.findall(".//wp:inline", NS):
+        if not looks_like_cover_shape(holder): continue
+        txbx = holder.find(".//wps:txbx/w:txbxContent", NS)
+        if txbx is None: continue
+        full = "".join(t.text or "" for t in txbx.findall(".//w:t", NS)).lower()
+        if not full.strip(): continue
+        if "universite" in full or "université" in full:
+            for r in txbx.findall(".//w:r", NS): set_run_props(r, size=10)
+        elif "fiche de cours" in full:
+            for r in txbx.findall(".//w:r", NS): set_run_props(r, size=22)
+        elif "introduction" in full and "biologie" in full:
+            for r in txbx.findall(".//w:r", NS): set_run_props(r, size=20)
+
 # ---------- Pipeline ----------
 def process_bytes(docx_bytes: bytes,
                   legend_bytes: bytes = None,
@@ -287,6 +337,7 @@ def process_bytes(docx_bytes: bytes,
 
     with zipfile.ZipFile(io.BytesIO(docx_bytes), "r") as zin:
         parts: Dict[str, bytes] = {n: zin.read(n) for n in zin.namelist()}
+    theme_colors = extract_theme_colors(parts)
 
     for name, data in list(parts.items()):
         if not name.endswith(".xml"): continue
@@ -298,11 +349,13 @@ def process_bytes(docx_bytes: bytes,
         red_to_black(root)
 
         if name == "word/document.xml":
+            cover_sizes_cleanup(root)           # w:p tailles (déjà en place)
+            tune_cover_dml_textsizes(root)      # tailles DML (formes)
+            tune_cover_wps_textsizes(root)      # tailles WPS (zones de texte)
             cover_sizes_cleanup(root)           # w:p
-            tune_cover_dml_textsizes(root)      # formes DML (fix inversion fiche/introduction)
-            tables_and_numbering(root)
+            tune_cover_dml_textsizes(root)      # formes DML (fix inversion fiche/introduction)            tables_and_numbering(root)
             reposition_small_icon(root, icon_left, icon_top)
-            remove_large_grey_rectangles(root)
+            remove_large_grey_rectangles(root, theme_colors)
 
         if name.startswith("word/footer"):
             force_footer_size_10(root)
