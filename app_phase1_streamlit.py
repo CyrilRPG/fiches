@@ -414,7 +414,7 @@ def build_anchored_image(rId, width_cm, height_cm, left_cm, top_cm, name="Legend
     gData = ET.SubElement(graphic, f"{{{A}}}graphicData", {"uri": "http://schemas.openxmlformats.org/drawingml/2006/picture"})
     pic = ET.SubElement(gData, f"{{{PIC}}}pic")
     nvPicPr = ET.SubElement(pic, f"{{{PIC}}}nvPicPr")
-    ET.SubElement(nvPicPr, f"{{{PIC}}}cNvPr", {"id": "0", "name": name + ".img"})
+    ET.SubElement(nvPicPr, f"{{{PIC}}}cNvPr", {"id": "0", "name": name + ".img")
     ET.SubElement(nvPicPr, f"{{{PIC}}}cNvPicPr"})
     blipFill = ET.SubElement(pic, f"{{{PIC}}}blipFill")
     ET.SubElement(blipFill, f"{{{A}}}blip", {f"{{{R}}}embed": rId})
