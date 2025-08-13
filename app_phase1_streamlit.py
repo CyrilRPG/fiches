@@ -12,7 +12,7 @@ import streamlit as st
 W   = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 WP  = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
 A   = "http://schemas.openxmlformats.org/drawingml/2006/main"
-PIC = "http://schemas.openxmlformats.org/drawingml/picture"
+PIC = "http://schemas.openxmlformats.org/drawingml/2006/picture"
 R   = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 P_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
 WPS = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
@@ -112,16 +112,61 @@ def force_calibri(root):
     for r in root.findall(".//w:r", NS):
         set_run_props(r, calibri=True)
 
+# 🔧 ─────────────────────── SEULE CHOSE MODIFIÉE ───────────────────────
 def red_to_black(root):
-    # Ancienne règle : convertit le rouge pur en noir partout (on la laisse)
-    for r in root.findall(".//w:r", NS):
-        rPr = r.find("w:rPr", NS)
-        c = None if rPr is None else rPr.find("w:color", NS)
-        if c is not None and (c.get(f"{{{W}}}val", "").upper() == "FF0000"):
+    """
+    Met en noir les runs dont la couleur est un rouge/bleu "classique Word"
+    (liste élargie + détection par tolérance), ainsi que les liens (hyperlink/followedHyperlink).
+    Ne touche à rien d’autre.
+    """
+    RED_HEX = {
+        "FF0000","C00000","CC0000","E60000","ED1C24","F44336","DC143C","B22222","E74C3C","D0021B"
+    }
+    BLUE_HEX = {
+        "0000FF","0070C0","2E74B5","1F497D","2F5496","4F81BD","5B9BD5","1F4E79","0F4C81","1E90FF","3399FF","3C78D8"
+    }
+
+    def looks_red(rgb: Tuple[int,int,int]) -> bool:
+        r,g,b = rgb
+        return (r >= 170 and g <= 110 and b <= 110)
+
+    def looks_blue(rgb: Tuple[int,int,int]) -> bool:
+        r,g,b = rgb
+        return (b >= 170 and r <= 110 and g <= 140)
+
+    for run in root.findall(".//w:r", NS):
+        rPr = run.find("w:rPr", NS)
+        if rPr is None:
+            continue
+        c = rPr.find("w:color", NS)
+        if c is None:
+            continue
+
+        val = (c.get(f"{{{W}}}val") or "").strip().upper()
+        theme = (c.get(f"{{{W}}}themeColor") or "").strip().lower()
+
+        make_black = False
+
+        # 1) Thèmes typiquement bleus (liens)
+        if theme in {"hyperlink", "followedHyperlink"}:
+            make_black = True
+
+        # 2) Hex explicite
+        if not make_black and re.fullmatch(r"[0-9A-F]{6}", val or ""):
+            if val in RED_HEX or val in BLUE_HEX:
+                make_black = True
+            else:
+                # 3) Heuristique proche rouge/bleu
+                rgb = _hex_to_rgb(val)
+                if rgb:
+                    if looks_red(rgb) or looks_blue(rgb):
+                        make_black = True
+
+        if make_black:
             c.set(f"{{{W}}}val", "000000")
+            # nettoyer tout héritage de thème qui pourrait réappliquer une teinte
             for a in ("themeColor", "themeTint", "themeShade"):
-                if c.get(f"{{{W}}}{a}") is not None:
-                    c.attrib.pop(f"{{{W}}}{a}", None)
+                c.attrib.pop(f"{{{W}}}{a}", None)
 
 # ───────────────────────── Helpers couvertures (formes) ────────────
 def holder_pos_cm(holder) -> Tuple[float, float]:
@@ -238,16 +283,13 @@ def tables_and_numbering(root):
         rows = tbl.findall(".//w:tr", NS)
         if not rows:
             continue
-        # Titre (1ère ligne)
         for p in rows[0].findall(".//w:p", NS):
             for r in p.findall(".//w:r", NS):
                 set_run_props(r, size=12, bold=True)
-        # Corps
         for tr in rows[1:]:
             for p in tr.findall(".//w:p", NS):
                 for r in p.findall(".//w:r", NS):
                     set_run_props(r, size=9)
-    # Numérotations romaines
     for p in root.findall(".//w:p", NS):
         if ROMAN_RE.match(get_text(p).strip() or ""):
             for r in p.findall(".//w:r", NS):
@@ -275,8 +317,14 @@ def _apply_lum(base_rgb: Tuple[int,int,int], lumMod: Optional[str], lumOff: Opti
     return (f(r), f(g), f(b))
 
 def _resolve_solid_fill_color(spPr: ET.Element, theme_colors: Dict[str,str]) -> Optional[Tuple[int,int,int]]:
+    """
+    Retourne la couleur RGB du remplissage (si détectable) à partir de a:solidFill
+    contenu dans a:spPr ou wps:spPr. Gère srgbClr, schemeClr et sysClr (+lumMod/lumOff).
+    """
     if spPr is None:
         return None
+
+    # a:solidFill où qu'il soit sous spPr
     solid = None
     for el in spPr.iter():
         if el.tag == f"{{{A}}}solidFill":
@@ -284,6 +332,8 @@ def _resolve_solid_fill_color(spPr: ET.Element, theme_colors: Dict[str,str]) -> 
             break
     if solid is None:
         return None
+
+    # RGB direct
     srgb = solid.find("a:srgbClr", NS)
     if srgb is not None and srgb.get("val"):
         rgb = _hex_to_rgb(srgb.get("val"))
@@ -293,6 +343,8 @@ def _resolve_solid_fill_color(spPr: ET.Element, theme_colors: Dict[str,str]) -> 
             rgb = _apply_lum(rgb, lm.get("val") if lm is not None else None,
                                   lo.get("val") if lo is not None else None)
         return rgb
+
+    # Couleur de thème
     scheme = solid.find("a:schemeClr", NS)
     if scheme is not None:
         base_hex = theme_colors.get((scheme.get("val") or "").lower())
@@ -302,6 +354,8 @@ def _resolve_solid_fill_color(spPr: ET.Element, theme_colors: Dict[str,str]) -> 
         if base_rgb:
             return _apply_lum(base_rgb, lm.get("val") if lm is not None else None,
                                          lo.get("val") if lo is not None else None)
+
+    # Couleur système (+ fallback lastClr)
     sysc = solid.find("a:sysClr", NS)
     if sysc is not None:
         base_hex = sysc.get("lastClr") or sysc.get("val")
@@ -345,7 +399,15 @@ def extract_theme_colors(parts: Dict[str, bytes]) -> Dict[str, str]:
 def remove_large_grey_rectangles(root: ET.Element, theme_colors: Dict[str, str]):
     """
     Supprime uniquement le grand rectangle gris clair (#F2F2F2 ± tolérance) à droite de la couverture.
-    Laisse le plan (formes avec texte) intact.
+    On laisse le plan (formes avec du texte) intact.
+    Critères DML :
+      - wp:anchor/wp:inline sans pic:pic
+      - géométrie rect/roundRect
+      - AUCUN texte
+      - position X ≥ 9 cm
+      - taille ≥ 7 cm × 12 cm
+      - couleur de remplissage ≈ #F2F2F2 (srgbClr | schemeClr | sysClr + lumMod/lumOff)
+    VML : même logique sur base de style/fillcolor.
     """
     parent_map = {child: parent for parent in root.iter() for child in parent}
 
@@ -356,22 +418,28 @@ def remove_large_grey_rectangles(root: ET.Element, theme_colors: Dict[str, str])
             continue
         if holder.find(".//pic:pic", NS) is not None:
             continue
+
         prst = holder.find(".//a:prstGeom", NS)
         if prst is None or prst.get("prst") not in ("rect", "roundRect"):
             continue
+
         extent = holder.find("wp:extent", NS)
         if extent is None:
             continue
         try:
-            cx = int(extent.get("cx", "0")); cy = int(extent.get("cy", "0"))
+            cx = int(extent.get("cx", "0"))
+            cy = int(extent.get("cy", "0"))
         except Exception:
             continue
-        width_cm  = emu_to_cm(cx); height_cm = emu_to_cm(cy)
+        width_cm  = emu_to_cm(cx)
+        height_cm = emu_to_cm(cy)
+
         x_el = holder.find(".//wp:positionH/wp:posOffset", NS)
         try:
             x_cm = emu_to_cm(int(x_el.text)) if x_el is not None else 0.0
         except Exception:
             x_cm = 0.0
+
         if _shape_has_text(holder):
             continue
 
@@ -379,18 +447,22 @@ def remove_large_grey_rectangles(root: ET.Element, theme_colors: Dict[str, str])
         if spPr is None:
             for el in holder.iter():
                 if el.tag.endswith("spPr"):
-                    spPr = el; break
+                    spPr = el
+                    break
+
         rgb = _resolve_solid_fill_color(spPr, theme_colors)
         looks_gray = rgb is not None and \
                      abs(rgb[0]-0xF2) <= 12 and abs(rgb[1]-0xF2) <= 12 and abs(rgb[2]-0xF2) <= 12
+
         on_right   = x_cm >= 9.0
         big_enough = (width_cm >= 7.0 and height_cm >= 12.0)
+
         if looks_gray and on_right and big_enough:
             parent = parent_map.get(drawing)
             if parent is not None:
                 parent.remove(drawing)
 
-    # VML (fallback)
+    # VML (formes héritées)
     for pict in root.findall(".//w:pict", NS):
         for tag in ("rect", "roundrect", "shape"):
             for shape in pict.findall(f".//v:{tag}", NS):
@@ -402,72 +474,18 @@ def remove_large_grey_rectangles(root: ET.Element, theme_colors: Dict[str, str])
                     continue
                 w = float(m_w.group(1)); h = float(m_h.group(1))
                 left_cm = float(m_l.group(1)) if m_l else 0.0
+
                 fill_attr = (shape.get("fillcolor") or "").lstrip("#")
                 rgb = _hex_to_rgb(fill_attr.upper())
                 looks_gray = rgb is not None and \
                              abs(rgb[0]-0xF2) <= 12 and abs(rgb[1]-0xF2) <= 12 and abs(rgb[2]-0xF2) <= 12
+
                 has_txbx = shape.find(".//w:txbxContent", NS) is not None
+
                 if looks_gray and not has_txbx and left_cm >= 9.0 and w >= 7.0 and h >= 12.0:
                     parent = parent_map.get(pict)
                     if parent is not None:
                         parent.remove(pict)
-
-# ───────────────────────── Recoloration texte des tableaux ─────────
-# Palette Word typique (rouges/bleus usuels) + tolérances
-_RED_HEX = {
-    "FF0000","C00000","E74C3C","D0021B","ED1C24","F44336","DC143C","B22222","CC0000","E60000",
-}
-_BLUE_HEX = {
-    "0000FF","0070C0","2E74B5","1F497D","2F5496","4F81BD","5B9BD5","1F4E79","0F4C81","1E90FF","3399FF","3C78D8",
-}
-def _rgb_like_red(rgb: Tuple[int,int,int]) -> bool:
-    r,g,b = rgb
-    return (r >= 180 and g <= 110 and b <= 110)
-def _rgb_like_blue(rgb: Tuple[int,int,int]) -> bool:
-    r,g,b = rgb
-    return (b >= 170 and r <= 120 and g <= 150)
-
-def _is_red_or_blue_color_element(color_el: ET.Element) -> Optional[str]:
-    """Retourne 'red', 'blue' ou None selon w:color."""
-    if color_el is None:
-        return None
-    val = (color_el.get(f"{{{W}}}val") or "").strip().upper()
-    theme = (color_el.get(f"{{{W}}}themeColor") or "").strip().lower()
-    # Cas thèmes Word
-    if theme in {"hyperlink","accent1"}:
-        return "blue"
-    # Hex direct
-    rgb = _hex_to_rgb(val)
-    if rgb:
-        if val in _RED_HEX or _rgb_like_red(rgb):
-            return "red"
-        if val in _BLUE_HEX or _rgb_like_blue(rgb):
-            return "blue"
-    return None
-
-def recolor_tables_non_header_red_blue_to_black(root: ET.Element):
-    """Dans chaque tableau, transforme le rouge/bleu en noir pour toutes les lignes sauf la première."""
-    for tbl in root.findall(".//w:tbl", NS):
-        rows = tbl.findall(".//w:tr", NS)
-        if len(rows) <= 1:
-            continue
-        # Parcourir les lignes du corps (hors titre)
-        for tr in rows[1:]:
-            for p in tr.findall(".//w:p", NS):
-                for r in p.findall(".//w:r", NS):
-                    rPr = r.find("w:rPr", NS)
-                    if rPr is None:
-                        continue
-                    c = rPr.find("w:color", NS)
-                    kind = _is_red_or_blue_color_element(c)
-                    if kind in {"red","blue"}:
-                        if c is None:
-                            c = ET.SubElement(rPr, f"{{{W}}}color")
-                        c.set(f"{{{W}}}val", "000000")
-                        # Nettoyage des héritages de thème
-                        for a in ("themeColor","themeTint","themeShade"):
-                            if c.get(f"{{{W}}}{a}") is not None:
-                                c.attrib.pop(f"{{{W}}}{a}", None)
 
 # ───────────────────────── Légende (optionnelle) ───────────────────
 def build_anchored_image(rId, width_cm, height_cm, left_cm, top_cm, name="Legende"):
@@ -588,7 +606,8 @@ def reposition_small_icon(root, left_cm=15.3, top_cm=11.0):
         if extent is None:
             continue
         try:
-            cx = int(extent.get("cx", "0")); cy = int(extent.get("cy", "0"))
+            cx = int(extent.get("cx", "0"))
+            cy = int(extent.get("cy", "0"))
         except Exception:
             continue
         if anchor.find(".//pic:pic", NS) is None:
@@ -598,7 +617,8 @@ def reposition_small_icon(root, left_cm=15.3, top_cm=11.0):
         x = anchor.findtext("wp:positionH/wp:posOffset", default="0", namespaces=NS)
         y = anchor.findtext("wp:positionV/wp:posOffset", default="0", namespaces=NS)
         try:
-            x_cm = emu_to_cm(int(x)); y_cm = emu_to_cm(int(y))
+            x_cm = emu_to_cm(int(x))
+            y_cm = emu_to_cm(int(y))
         except Exception:
             x_cm, y_cm = 0.0, 0.0
         cand.append((x_cm, y_cm, anchor))
@@ -608,11 +628,13 @@ def reposition_small_icon(root, left_cm=15.3, top_cm=11.0):
     anchor = chosen[2]
 
     posH = anchor.find("wp:positionH", NS) or ET.SubElement(anchor, f"{{{WP}}}positionH")
-    for ch in list(posH): posH.remove(ch)
+    for ch in list(posH):
+        posH.remove(ch)
     posH.set("relativeFrom", "page")
     ET.SubElement(posH, f"{{{WP}}}posOffset").text = str(cm_to_emu(left_cm))
     posV = anchor.find("wp:positionV", NS) or ET.SubElement(anchor, f"{{{WP}}}positionV")
-    for ch in list(posV): posV.remove(ch)
+    for ch in list(posV):
+        posV.remove(ch)
     posV.set("relativeFrom", "page")
     ET.SubElement(posV, f"{{{WP}}}posOffset").text = str(cm_to_emu(top_cm))
 
@@ -657,14 +679,12 @@ def process_bytes(
         replace_years(root)
         strip_actualisation_everywhere(root)
         force_calibri(root)
-        red_to_black(root)
+        red_to_black(root)  # ← élargi pour couvrir rouge ET bleu
 
         if name == "word/document.xml":
             cover_sizes_cleanup(root)
             tune_cover_shapes_spatial(root)
             tables_and_numbering(root)
-            # 👉 nouvelle règle : recolorer rouge/bleu -> noir dans le corps des tableaux
-            recolor_tables_non_header_red_blue_to_black(root)
             reposition_small_icon(root, icon_left, icon_top)
             remove_large_grey_rectangles(root, theme_colors)
 
@@ -673,7 +693,7 @@ def process_bytes(
 
         parts[name] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
-    # Légende optionnelle
+    # Légende optionnelle (inchangé)
     if legend_bytes and "word/document.xml" in parts and "word/_rels/document.xml.rels" in parts:
         parts["word/document.xml"] = remove_legend_text(parts["word/document.xml"])
         new_doc, new_rels, media = insert_legend_image(
