@@ -176,7 +176,7 @@ def build_anchored_image(rId, width_cm, height_cm, left_cm, top_cm, name="Legend
     ET.SubElement(anchor, f"{{{WP}}}effectExtent", {"l":"0","t":"0","r":"0","b":"0"})
     ET.SubElement(anchor, f"{{{WP}}}wrapNone")
     ET.SubElement(anchor, f"{{{WP}}}docPr", {"id":"10","name":name})
-    ET.SubElement(anchor, f"{{{WP}}}cNvGraphicFramePr"}
+    ET.SubElement(anchor, f"{{{WP}}}cNvGraphicFramePr")
     graphic = ET.SubElement(anchor, f"{{{A}}}graphic")
     gData   = ET.SubElement(graphic, f"{{{A}}}graphicData", {"uri":"http://schemas.openxmlformats.org/drawingml/2006/picture"})
     pic     = ET.SubElement(gData, f"{{{PIC}}}pic")
