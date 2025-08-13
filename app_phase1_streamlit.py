@@ -83,15 +83,35 @@ def cover_sizes_cleanup(root):
     paras = root.findall(".//w:p", NS)
     texts = [get_text(p).strip() for p in paras]
     def set_size(p, pt):  [set_run_props(r, size=pt) for r in p.findall(".//w:r", NS)]
-    for i,txt in enumerate(texts):
+    last_was_fiche = False
+    in_plan = False
+    for i, txt in enumerate(texts):
         low = txt.lower()
-        if "fiche de cours" in low: set_size(paras[i], 22)     # rouge
-        if "université" in low and (any(x.replace("\u00A0"," ") in txt.replace("\u00A0"," ") for x in TARGETS+[REPL])): set_size(paras[i], 10)  # vert
-        if "introduction" in low and "biologie" in low: set_size(paras[i], 20)  # jaune
+        if "fiche de cours" in low:
+            set_size(paras[i], 22)
+            last_was_fiche = True
+            in_plan = False
+            continue
+        if last_was_fiche and txt:
+            set_size(paras[i], 20)
+            last_was_fiche = False
+        if txt.strip().upper() == "PLAN":
+            set_size(paras[i], 11)
+            in_plan = True
+            continue
+        if in_plan:
+            if txt.strip() == "" or low.startswith("légende"):
+                in_plan = False
+            else:
+                set_size(paras[i], 11)
+            continue
+        if "université" in low and (any(x.replace("\u00A0"," ") in txt.replace("\u00A0"," ") for x in TARGETS+[REPL])):
+            set_size(paras[i], 10)
+        if "introduction" in low and "biologie" in low:
+            set_size(paras[i], 20)
         if txt.strip().upper() == "ACTUALISATION":
             for t in paras[i].findall(".//w:t", NS):
                 if t.text: t.text = re.sub(r"(?i)ACTUALISATION","",t.text)
-        if txt.strip().upper() == "PLAN": set_size(paras[i], 11)
 
 def tables_and_numbering(root):
     # titre de tableau 12 gras ; reste 9
@@ -184,13 +204,31 @@ def remove_large_grey_rectangles(root, theme_colors: Dict[str, str]):
         is_rect = holder.find(".//a:prstGeom[@prst='rect']", NS) is not None \
                or holder.find(".//a:prstGeom[@prst='roundRect']", NS) is not None
 
-        if (not has_pic) and looks_like_cover_shape(holder) and is_rect and cx >= cm_to_emu(6) and cy >= cm_to_emu(8) and looks_f2:
         big_on_cover = looks_like_cover_shape(holder) and cx >= cm_to_emu(6) and cy >= cm_to_emu(8)
         very_big_anywhere = cx >= cm_to_emu(10) and cy >= cm_to_emu(10)
 
         if (not has_pic) and looks_f2 and is_rect and (big_on_cover or very_big_anywhere):
             parent = parent_map.get(drawing)
             if parent is not None: parent.remove(drawing)
+
+    # VML shapes
+    VML = {"v": "urn:schemas-microsoft-com:vml"}
+    for pict in root.findall(".//w:pict", NS):
+        for shape in pict.findall(".//v:rect", VML) + pict.findall(".//v:roundrect", VML) + pict.findall(".//v:shape", VML):
+            fill = (shape.get("fillcolor", "") or "").upper()
+            if not is_close_grey(fill, "#F2F2F2", 16):
+                continue
+            style = shape.get("style", "")
+            m_w = re.search(r"width:([0-9.]+)cm", style)
+            m_h = re.search(r"height:([0-9.]+)cm", style)
+            if m_w and m_h:
+                w = float(m_w.group(1)); h = float(m_h.group(1))
+                big_on_cover = w >= 6 and h >= 8
+                very_big_anywhere = w >= 10 and h >= 10
+                if big_on_cover or very_big_anywhere:
+                    parent = parent_map.get(pict)
+                    if parent is not None:
+                        parent.remove(pict)
 
 # ---------- Legend image ----------
 def build_anchored_image(rId, width_cm, height_cm, left_cm, top_cm, name="Legende"):
@@ -299,34 +337,48 @@ def force_footer_size_10(root):
 
 # ---------- DML cover text sizing ----------
 def tune_cover_dml_textsizes(root):
-    """Forcer tailles DML sur la couverture : université 10, 'Fiche de cours' 22, 'Introduction…' 20."""
+    """Forcer tailles DML sur la couverture : université 10, 'Fiche de cours' 22, nom du cours 20."""
+    last_was_fiche = False
     for holder in root.findall(".//wp:anchor", NS) + root.findall(".//wp:inline", NS):
         tx = holder.find(".//a:txBody", NS)
         if tx is None: continue
         text = "".join(t.text or "" for t in tx.findall(".//a:t", NS)).strip().lower()
         if not text: continue
-        # ordre important pour éviter les inversions
         if ("universite" in text) or ("université" in text):
             set_dml_text_size_in_txbody(tx, 10.0)
+            last_was_fiche = False
         elif "fiche de cours" in text:
             set_dml_text_size_in_txbody(tx, 22.0)
+            last_was_fiche = True
+        elif last_was_fiche:
+            set_dml_text_size_in_txbody(tx, 20.0)
+            last_was_fiche = False
         elif ("introduction" in text) and ("biologie" in text):
             set_dml_text_size_in_txbody(tx, 20.0)
+            last_was_fiche = False
 
 def tune_cover_wps_textsizes(root):
-    """Force tailles des zones de texte WPS sur la couverture (université 10, fiche 22, intro 20)."""
+    """Force tailles des zones de texte WPS sur la couverture (université 10, fiche 22, cours 20)."""
+    last_was_fiche = False
     for holder in root.findall(".//wp:anchor", NS) + root.findall(".//wp:inline", NS):
         if not looks_like_cover_shape(holder): continue
         txbx = holder.find(".//wps:txbx/w:txbxContent", NS)
         if txbx is None: continue
-        full = "".join(t.text or "" for t in txbx.findall(".//w:t", NS)).lower()
-        if not full.strip(): continue
+        full = "".join(t.text or "" for t in txbx.findall(".//w:t", NS)).strip().lower()
+        if not full:
+            continue
         if "universite" in full or "université" in full:
             for r in txbx.findall(".//w:r", NS): set_run_props(r, size=10)
+            last_was_fiche = False
         elif "fiche de cours" in full:
             for r in txbx.findall(".//w:r", NS): set_run_props(r, size=22)
+            last_was_fiche = True
+        elif last_was_fiche:
+            for r in txbx.findall(".//w:r", NS): set_run_props(r, size=20)
+            last_was_fiche = False
         elif "introduction" in full and "biologie" in full:
             for r in txbx.findall(".//w:r", NS): set_run_props(r, size=20)
+            last_was_fiche = False
 
 # ---------- Pipeline ----------
 def process_bytes(docx_bytes: bytes,
@@ -353,7 +405,8 @@ def process_bytes(docx_bytes: bytes,
             tune_cover_dml_textsizes(root)      # tailles DML (formes)
             tune_cover_wps_textsizes(root)      # tailles WPS (zones de texte)
             cover_sizes_cleanup(root)           # w:p
-            tune_cover_dml_textsizes(root)      # formes DML (fix inversion fiche/introduction)            tables_and_numbering(root)
+            tune_cover_dml_textsizes(root)      # formes DML (fix inversion fiche/introduction)
+            tables_and_numbering(root)
             reposition_small_icon(root, icon_left, icon_top)
             remove_large_grey_rectangles(root, theme_colors)
 
