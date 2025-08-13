@@ -111,52 +111,55 @@ def cover_sizes_cleanup(root):
             set_size(paras[i], 11)
 
 def tables_and_numbering(root):
-    # tableaux
+    # tableaux : 1ère ligne = titre 12 gras ; reste = 9
     for tbl in root.findall(".//w:tbl", NS):
         rows = tbl.findall(".//w:tr", NS)
         if not rows: continue
-        # 1ère ligne = titre
         for p in rows[0].findall(".//w:p", NS):
             for r in p.findall(".//w:r", NS): set_run_props(r, size=12, bold=True)
-        # autres lignes = corps 9
         for tr in rows[1:]:
             for p in tr.findall(".//w:p", NS):
                 for r in p.findall(".//w:r", NS): set_run_props(r, size=9)
-    # numérotation romaine
-    paras = root.findall(".//w:p", NS)
-    texts = [get_text(p).strip() for p in paras]
-    for i,p in enumerate(paras):
-        if ROMAN_RE.match(texts[i] or ""):
-            for r in p.findall(".//w:r", NS): set_run_props(r, size=10, bold=True, italic=True, color="FFFFFF")
-            j=i-1
-            while j>=0 and not texts[j].strip(): j-=1
-            if j>=0:
-                for r in paras[j].findall(".//w:r", NS): set_run_props(r, size=12, bold=True)
 
-def reposition_small_icon(root, left_cm=15.5, top_cm=11.0):
-    # déplace la 1ère petite image (<=3cm) : “icône écriture”
-    for anchor in root.findall(".//wp:anchor", NS):
-        extent = anchor.find("wp:extent", NS)
-        if extent is None: continue
-        cx = int(extent.get("cx","0")); cy = int(extent.get("cy","0"))
-        if anchor.find(".//pic:pic", NS) is not None and cx <= cm_to_emu(3) and cy <= cm_to_emu(3):
-            posH = anchor.find("wp:positionH", NS) or ET.SubElement(anchor, f"{{{WP}}}positionH", {"relativeFrom":"page"})
-            posH.set("relativeFrom","page"); [posH.remove(ch) for ch in list(posH)]
-            ET.SubElement(posH, f"{{{WP}}}posOffset").text = str(cm_to_emu(left_cm))
-            posV = anchor.find("wp:positionV", NS) or ET.SubElement(anchor, f"{{{WP}}}positionV", {"relativeFrom":"page"})
-            posV.set("relativeFrom","page"); [posV.remove(ch) for ch in list(posV)]
-            ET.SubElement(posV, f"{{{WP}}}posOffset").text = str(cm_to_emu(top_cm))
-            break
+    # numérotation romaine : 10 / italic / bold / blanc
+    for p in root.findall(".//w:p", NS):
+        if ROMAN_RE.match(get_text(p).strip() or ""):
+            for r in p.findall(".//w:r", NS):
+                set_run_props(r, size=10, bold=True, italic=True, color="FFFFFF")
+    # ⚠️ on NE met plus le paragraphe précédent en 12 gras → évite les faux positifs (ex. encadré jaune)
+
+def build_parent_map(root):
+    return {child: parent for parent in root.iter() for child in parent}
 
 def remove_large_grey_rectangles(root):
+    """Supprime les grands rectangles gris (p. ex. #F2F2F2) y compris sur la page de garde.
+       Cible wp:anchor ET wp:inline ; retire le nœud w:drawing complet (préserve la mise en page)."""
     GREYS = {"D9D9D9","E7E7E7","EEEEEE","F2F2F2","EDEDED","EFEFEF","DDDDDD","CCCCCC","F0F0F0"}
-    for anchor in root.findall(".//wp:anchor", NS):
-        extent = anchor.find("wp:extent", NS)
-        if extent is None: continue
-        cx = int(extent.get("cx","0")); cy = int(extent.get("cy","0"))
-        vals = [el.get("val","").upper() for el in anchor.findall(".//a:srgbClr", NS)]
-        if cx >= cm_to_emu(6) and cy >= cm_to_emu(6) and any(v in GREYS for v in vals):
-            anchor.clear()  # enlève totalement le rectangle
+    parent_map = build_parent_map(root)
+
+    for drawing in root.findall(".//w:drawing", NS):
+        anchor = drawing.find(".//wp:anchor", NS)
+        inline = drawing.find(".//wp:inline", NS)
+        holder = anchor if anchor is not None else inline
+        if holder is None:
+            continue
+
+        extent = holder.find("wp:extent", NS)
+        if extent is None:
+            continue
+        try:
+            cx = int(extent.get("cx","0")); cy = int(extent.get("cy","0"))
+        except:
+            continue
+
+        # couleurs présentes (solidFill -> srgbClr)
+        vals = [el.get("val","").upper() for el in holder.findall(".//a:srgbClr", NS)]
+
+        # grand bloc gris ? (≥ 5 cm et couleur dans GREYS)
+        if cx >= cm_to_emu(5) and cy >= cm_to_emu(5) and any(v in GREYS for v in vals):
+            parent = parent_map.get(drawing)
+            if parent is not None:
+                parent.remove(drawing)  # suppression totale du bloc
 
 def build_anchored_image(rId, width_cm, height_cm, left_cm, top_cm, name="Legende"):
     cx = cm_to_emu(width_cm); cy = cm_to_emu(height_cm)
@@ -176,7 +179,7 @@ def build_anchored_image(rId, width_cm, height_cm, left_cm, top_cm, name="Legend
     ET.SubElement(anchor, f"{{{WP}}}effectExtent", {"l":"0","t":"0","r":"0","b":"0"})
     ET.SubElement(anchor, f"{{{WP}}}wrapNone")
     ET.SubElement(anchor, f"{{{WP}}}docPr", {"id":"10","name":name})
-    ET.SubElement(anchor, f"{{{WP}}}cNvGraphicFramePr")   # corrigé
+    ET.SubElement(anchor, f"{{{WP}}}cNvGraphicFramePr")
     graphic = ET.SubElement(anchor, f"{{{A}}}graphic")
     gData   = ET.SubElement(graphic, f"{{{A}}}graphicData", {"uri":"http://schemas.openxmlformats.org/drawingml/2006/picture"})
     pic     = ET.SubElement(gData, f"{{{PIC}}}pic")
@@ -184,7 +187,7 @@ def build_anchored_image(rId, width_cm, height_cm, left_cm, top_cm, name="Legend
     ET.SubElement(nvPicPr, f"{{{PIC}}}cNvPr", {"id":"0","name":name+".img"})
     ET.SubElement(nvPicPr, f"{{{PIC}}}cNvPicPr")
     blipFill= ET.SubElement(pic, f"{{{PIC}}}blipFill")
-    ET.SubElement(blipFill, f"{{{A}}}blip", {f"{{{R}}}embed": rId})  # rId injecté directement
+    ET.SubElement(blipFill, f"{{{A}}}blip", {f"{{{R}}}embed": rId})
     stretch = ET.SubElement(blipFill, f"{{{A}}}stretch"); ET.SubElement(stretch, f"{{{A}}}fillRect")
     spPr    = ET.SubElement(pic, f"{{{PIC}}}spPr")
     xfrm    = ET.SubElement(spPr, f"{{{A}}}xfrm")
@@ -218,7 +221,6 @@ def insert_legend_image(document_xml: bytes, rels_xml: bytes, image_bytes: bytes
             idx = i; break
     if idx is None and paras: idx = 0
 
-    # new rel id
     nums = []
     for rel in rels.findall(f".//{{{P_REL}}}Relationship"):
         rid = rel.get("Id","")
@@ -232,13 +234,11 @@ def insert_legend_image(document_xml: bytes, rels_xml: bytes, image_bytes: bytes
     rel.set("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image")
     rel.set("Target", media_name)
 
-    # build drawing using the new rId (no placeholder)
     drawing = build_anchored_image(new_rid, width_cm, height_cm, left_cm, top_cm, "Legende")
 
     if idx is not None:
         ET.SubElement(paras[idx], f"{{{W}}}r").append(drawing)
     else:
-        # no paragraph? append at end
         newp = ET.SubElement(root, f"{{{W}}}p")
         ET.SubElement(newp, f"{{{W}}}r").append(drawing)
 
@@ -270,7 +270,7 @@ def process_bytes(docx_bytes: bytes,
         if name == "word/document.xml":
             cover_sizes_cleanup(root)
             tables_and_numbering(root)
-            reposition_small_icon(root, icon_left, icon_top)
+            # supprime le grand rectangle gris (#F2F2F2) de la couverture
             remove_large_grey_rectangles(root)
         parts[name] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
@@ -299,8 +299,6 @@ st.caption("Transforme tes .docx en préservant 100% du design et en appliquant 
 
 with st.sidebar:
     st.subheader("Paramètres (cm)")
-    icon_left  = st.number_input("Icône écriture — gauche", value=15.5, step=0.1)
-    icon_top   = st.number_input("Icône écriture — haut",   value=11.0, step=0.1)
     legend_left= st.number_input("Image Légendes — gauche", value=2.25, step=0.1)
     legend_top = st.number_input("Image Légendes — haut",   value=25.0, step=0.1)
     legend_w   = st.number_input("Image Légendes — largeur",value=4.91, step=0.01)
@@ -322,7 +320,6 @@ if st.button("⚙️ Lancer le traitement", type="primary", disabled=not files):
                 out_bytes = process_bytes(
                     up.read(),
                     legend_bytes=legend_bytes,
-                    icon_left=icon_left, icon_top=icon_top,
                     legend_left=legend_left, legend_top=legend_top,
                     legend_w=legend_w, legend_h=legend_h
                 )
