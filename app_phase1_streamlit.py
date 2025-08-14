@@ -82,6 +82,15 @@ def normalize_spaces(s: str) -> str:
     s = s.replace(" - ", " - ")
     return s
 
+def _norm_matchable(s: str) -> str:
+    """Minuscule, sans accents, espaces normalisés, NBSP→espace."""
+    s = s.replace("\u00A0", " ")
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    s = s.lower()
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
 # ───────────────────────── Remplacements texte ─────────────────────
 def replace_years(root):
     for p in root.findall(".//w:p", NS):
@@ -205,8 +214,7 @@ def force_red_bullets_black_in_styles(root):
             for a in ("themeColor","themeTint","themeShade"):
                 col.attrib.pop(f"{{{W}}}{a}", None)
 
-# ── 3) Puces rouges → noires : au niveau des paragraphes numérotés (document.xml)
-#     (⚠️ correction : PAS de prédicat XPath — on filtre en Python)
+# ── 3) Puces rouges → noires : au niveau des paragraphes numérotés
 def force_red_bullets_black_in_paragraphs(root):
     RED_HEX = {"FF0000","C00000","CC0000","E60000","ED1C24","F44336","DC143C","B22222","E74C3C","D0021B"}
     def looks_red(rgb: Tuple[int,int,int]) -> bool:
@@ -216,10 +224,7 @@ def force_red_bullets_black_in_paragraphs(root):
 
     for p in root.findall(".//w:p", NS):
         pPr = p.find("w:pPr", NS)
-        if pPr is None:
-            continue
-        # paragraphe en liste ?
-        if pPr.find("w:numPr", NS) is None:
+        if pPr is None or pPr.find("w:numPr", NS) is None:
             continue
         rPr = pPr.find("w:rPr", NS)
         if rPr is None:
@@ -336,6 +341,19 @@ def tune_cover_shapes_spatial(root):
             for t in txbx.findall(".//w:t", NS):
                 if t.text:
                     t.text = re.sub(r"(?iu)\b(actualisation|nouvelle\s+fiche)\b", "", t.text)
+
+# ───────────────────────── Forçage titre « fiche de cours » à 22 pt ─
+def force_title_fiche_de_cours_22(root):
+    # Paragraphe w:p
+    for p in root.findall(".//w:p", NS):
+        if "fiche de cours" in _norm_matchable(get_text(p)):
+            for r in p.findall(".//w:r", NS):
+                set_run_props(r, size=22)
+    # Formes (DrawingML / WPS)
+    for holder in root.findall(".//wp:anchor", NS) + root.findall(".//wp:inline", NS):
+        txt = get_tx_text(holder)
+        if txt and "fiche de cours" in _norm_matchable(txt):
+            set_tx_size(holder, 22.0)
 
 # ───────────────────────── Tables & numérotations ──────────────────
 def tables_and_numbering(root):
@@ -532,7 +550,7 @@ def build_anchored_image(rId, width_cm, height_cm, left_cm, top_cm, name="Legend
     nvPicPr = ET.SubElement(pic, f"{{{PIC}}}nvPicPr")
     ET.SubElement(nvPicPr, f"{{{PIC}}}cNvPr", {"id": "0", "name": name + ".img"})
     ET.SubElement(nvPicPr, f"{{{PIC}}}cNvPicPr")
-    blipFill = ET.SubElement(pic, f"{{{PIC}}}blipFill")
+    blipFill = ET.SubElement(pic, f"{{{PIC}}}blipFill"})
     ET.SubElement(blipFill, f"{{{A}}}blip", {f"{{{R}}}embed": rId})
     stretch = ET.SubElement(blipFill, f"{{{A}}}stretch")
     ET.SubElement(stretch, f"{{{A}}}fillRect")
@@ -674,14 +692,16 @@ def process_bytes(
             tables_and_numbering(root)
             reposition_small_icon(root, icon_left, icon_top)
             remove_large_grey_rectangles(root, theme_colors)
-            # 3) Paragraphe : puces rouges -> noires
+            # Puces rouges -> noires au niveau des paragraphes
             force_red_bullets_black_in_paragraphs(root)
+            # Forçage final du titre « fiche de cours » à 22 pt (paragraphe + formes)
+            force_title_fiche_de_cours_22(root)
 
-        # 1) Numbering : puces rouges -> noires
+        # Puces rouges -> noires (définitions)
         if name == "word/numbering.xml":
             force_red_bullets_black_in_numbering(root)
 
-        # 2) Styles : puces rouges -> noires
+        # Puces rouges -> noires (styles)
         if name == "word/styles.xml":
             force_red_bullets_black_in_styles(root)
 
