@@ -24,12 +24,14 @@ for k, v in NS.items():
     ET.register_namespace(k, v)
 
 # ───────────────────────── Règles/constantes ───────────────────────
-# Remplacement d'années : robuste aux NBSP/espaces fines et à tous les tirets/dashes
+# Remplacement d'années (tolère espaces & tirets variés)
 YEAR_PAT = re.compile(
     r"2024(?:[\u00A0\u2007\u202F\s]*[\-\u2010\u2011\u2012\u2013\u2014\u2212][\u00A0\u2007\u202F\s]*)2025"
 )
 REPL = "2025 - 2026"
-ROMAN_RE = re.compile(r"^\s*[IVXLC]+\s*[.)]?\s+.+", re.IGNORECASE)
+
+# Titre numéroté type "I. Section ..." (chiffres romains + texte)
+ROMAN_TITLE_RE = re.compile(r"^\s*[IVXLC]+\s*[.)]?\s+.+", re.IGNORECASE)
 
 # ───────────────────────── Utils ───────────────────────────────────
 def cm_to_emu(cm: float) -> int:
@@ -96,7 +98,7 @@ def _norm_matchable(s: str) -> str:
 
 # ───────────────────────── Remplacements texte ─────────────────────
 def replace_years(root):
-    # 1) Paragraphe Word : joint tous les w:t pour gérer les coupures sur plusieurs runs
+    # w:t regroupés par paragraphe (pour passer à travers les runs éclatés)
     for p in root.findall(".//w:p", NS):
         wts = p.findall(".//w:t", NS)
         if not wts:
@@ -105,8 +107,7 @@ def replace_years(root):
         new = YEAR_PAT.sub(REPL, txt)
         if new != txt:
             redistribute(wts, new)
-
-    # 2) Texte de formes DrawingML : traite par bloc de a:txBody (concatène les a:t)
+    # Texte dans les formes (a:txBody)
     for tx in root.findall(".//a:txBody", NS):
         ats = tx.findall(".//a:t", NS)
         if not ats:
@@ -117,15 +118,17 @@ def replace_years(root):
             redistribute(ats, new)
 
 def strip_actualisation_everywhere(root):
+    # Ajout : « nouveau cours »
+    PAT = re.compile(r"(?iu)\b(actualisation|nouvelle\s+fiche|changements?\s+notables?|nouveau\s+cours)\b")
     for t in root.findall(".//w:t", NS) + root.findall(".//a:t", NS):
         if t.text:
-            t.text = re.sub(r"(?iu)\b(actualisation|nouvelle\s+fiche)\b", "", t.text)
+            t.text = PAT.sub("", t.text)
 
 def force_calibri(root):
     for r in root.findall(".//w:r", NS):
         set_run_props(r, calibri=True)
 
-# ── recoloration texte rouge/bleu → noir
+# ───────────────────────── Couleurs ────────────────────────────────
 def _hex_to_rgb(h: str) -> Optional[Tuple[int, int, int]]:
     h = (h or "").strip().lstrip("#").upper()
     if len(h) != 6 or not re.fullmatch(r"[0-9A-F]{6}", h):
@@ -168,7 +171,7 @@ def red_to_black(root):
             for a in ("themeColor", "themeTint", "themeShade"):
                 c.attrib.pop(f"{{{W}}}{a}", None)
 
-# ── 1) Puces rouges → noires : numbering.xml
+# ── Puces rouges → noires : numbering.xml
 def force_red_bullets_black_in_numbering(root):
     RED_HEX = {"FF0000","C00000","CC0000","E60000","ED1C24","F44336","DC143C","B22222","E74C3C","D0021B"}
     def looks_red(rgb: Tuple[int,int,int]) -> bool:
@@ -189,7 +192,7 @@ def force_red_bullets_black_in_numbering(root):
             for a in ("themeColor","themeTint","themeShade"):
                 col.attrib.pop(f"{{{W}}}{a}", None)
 
-# ── 2) Puces rouges → noires : styles de liste (styles.xml)
+# ── Puces rouges → noires : styles.xml
 def force_red_bullets_black_in_styles(root):
     CANDIDATES = {"list","bullet","puce","puces","liste"}
     RED_HEX = {"FF0000","C00000","CC0000","E60000","ED1C24","F44336","DC143C","B22222","E74C3C","D0021B"}
@@ -220,7 +223,7 @@ def force_red_bullets_black_in_styles(root):
             for a in ("themeColor","themeTint","themeShade"):
                 col.attrib.pop(f"{{{W}}}{a}", None)
 
-# ── 3) Puces rouges → noires : au niveau des paragraphes numérotés
+# ── Puces rouges → noires : paragraphes numérotés
 def force_red_bullets_black_in_paragraphs(root):
     RED_HEX = {"FF0000","C00000","CC0000","E60000","ED1C24","F44336","DC143C","B22222","E74C3C","D0021B"}
     def looks_red(rgb: Tuple[int,int,int]) -> bool:
@@ -277,7 +280,7 @@ def set_tx_size(holder, pt: float):
         for r in txbx.findall(".//w:r", NS):
             set_run_props(r, size=pt)
 
-# ───────────────────────── Mise en forme couverture (paragraphes) ─
+# ───────────────────────── Mise en forme couverture ────────────────
 def cover_sizes_cleanup(root):
     paras = root.findall(".//w:p", NS)
     texts = [get_text(p).strip() for p in paras]
@@ -287,22 +290,21 @@ def cover_sizes_cleanup(root):
     last_was_fiche = False
     for i, txt in enumerate(texts):
         low = txt.lower()
-        if txt.strip().upper() in ("ACTUALISATION", "NOUVELLE FICHE"):
+        if txt.strip().upper() in ("ACTUALISATION", "NOUVELLE FICHE", "CHANGEMENTS NOTABLES", "NOUVEAU COURS"):
             for t in paras[i].findall(".//w:t", NS):
                 if t.text:
-                    t.text = re.sub(r"(?iu)\b(actualisation|nouvelle\s+fiche)\b", "", t.text)
+                    t.text = re.sub(r"(?iu)\b(actualisation|nouvelle\s+fiche|changements?\s+notables?|nouveau\s+cours)\b", "", t.text)
             continue
         if "fiche de cours" in low:
             set_size(paras[i], 22)
             last_was_fiche = True
             continue
         if last_was_fiche and txt:
-            set_size(paras[i], 20)
+            set_size(paras[i], 20)   # nom du cours juste sous le titre
             last_was_fiche = False
-        if "université" in low and YEAR_PAT.search(txt):
+        if "université" in low and YEAR_PAT.search(txt.replace("\u00A0"," ")):
             set_size(paras[i], 10)
 
-# ───────────────────────── Couverture : formes DML/WPS (spatial) ──
 def tune_cover_shapes_spatial(root):
     holders = []
     for holder in root.findall(".//wp:anchor", NS) + root.findall(".//wp:inline", NS):
@@ -316,7 +318,7 @@ def tune_cover_shapes_spatial(root):
     holders.sort(key=lambda t: (t[0], t[1]))
     for _, _, h, txt in holders:
         low = txt.lower()
-        if ("universite" in low or "université" in low) and YEAR_PAT.search(txt):
+        if ("universite" in low or "université" in low) and YEAR_PAT.search(txt.replace("\u00A0"," ")):
             set_tx_size(h, 10.0)
     idx_fiche = None
     for i, (_, _, h, txt) in enumerate(holders):
@@ -325,36 +327,82 @@ def tune_cover_shapes_spatial(root):
             idx_fiche = i
             break
     if idx_fiche is not None:
+        # Ligne suivante = nom du cours → 20 pt
         for j in range(idx_fiche + 1, len(holders)):
             txt_next = holders[j][3].strip()
             if txt_next and "fiche de cours" not in txt_next.lower():
                 set_tx_size(holders[j][2], 20.0)
                 break
+    # Nettoyage mentions
     for _, _, h, _ in holders:
         tx = h.find(".//a:txBody", NS)
         if tx is not None:
             for t in tx.findall(".//a:t", NS):
                 if t.text:
-                    t.text = re.sub(r"(?iu)\b(actualisation|nouvelle\s+fiche)\b", "", t.text)
+                    t.text = re.sub(r"(?iu)\b(actualisation|nouvelle\s+fiche|changements?\s+notables?|nouveau\s+cours)\b", "", t.text)
         txbx = h.find(".//wps:txbx/w:txbxContent", NS)
         if txbx is not None:
             for t in txbx.findall(".//w:t", NS):
                 if t.text:
-                    t.text = re.sub(r"(?iu)\b(actualisation|nouvelle\s+fiche)\b", "", t.text)
+                    t.text = re.sub(r"(?iu)\b(actualisation|nouvelle\s+fiche|changements?\s+notables?|nouveau\s+cours)\b", "", t.text)
 
-# ───────────────────────── Forçage titre « fiche de cours » à 22 pt ─
 def force_title_fiche_de_cours_22(root):
+    # Paragraphes Word
     for p in root.findall(".//w:p", NS):
         if "fiche de cours" in _norm_matchable(get_text(p)):
             for r in p.findall(".//w:r", NS):
                 set_run_props(r, size=22)
+    # Formes
     for holder in root.findall(".//wp:anchor", NS) + root.findall(".//wp:inline", NS):
         txt = get_tx_text(holder)
         if txt and "fiche de cours" in _norm_matchable(txt):
             set_tx_size(holder, 22.0)
 
+def force_course_name_after_title_20(root):
+    # 1er paragraphe non vide après « fiche de cours »
+    paras = root.findall(".//w:p", NS)
+    for i, p in enumerate(paras):
+        if "fiche de cours" in _norm_matchable(get_text(p)):
+            for j in range(i+1, len(paras)):
+                if get_text(paras[j]).strip():
+                    for r in paras[j].findall(".//w:r", NS):
+                        set_run_props(r, size=20)
+                    break
+            break
+    # (Pour les formes, déjà géré dans tune_cover_shapes_spatial)
+
 # ───────────────────────── Tables & numérotations ──────────────────
+def _is_dark_hex(hexv: Optional[str]) -> bool:
+    if not hexv: return False
+    rgb = _hex_to_rgb(hexv)
+    if not rgb: return False
+    r,g,b = rgb
+    # sombre + dominée par le bleu
+    return (r+g+b) < 200 and b >= max(r, g)
+
+_DARK_BLUE_SET = {"002060","1F4E79","0F4C81","1F497D","2F5496","112F4E","203764","23395D"}
+
+def _para_or_cell_has_dark_bg(p: ET.Element, parent_map: Dict[ET.Element, ET.Element]) -> bool:
+    # shd au paragraphe
+    shd = p.find("w:pPr/w:shd", NS)
+    if shd is not None:
+        fill = (shd.get(f"{{{W}}}fill") or "").upper()
+        if fill in _DARK_BLUE_SET or _is_dark_hex(fill):
+            return True
+    # remonter cellule
+    node = p
+    while node is not None and node.tag != f"{{{W}}}tc":
+        node = parent_map.get(node)
+    if node is not None:
+        shd2 = node.find("w:tcPr/w:shd", NS)
+        if shd2 is not None:
+            fill2 = (shd2.get(f"{{{W}}}fill") or "").upper()
+            if fill2 in _DARK_BLUE_SET or _is_dark_hex(fill2):
+                return True
+    return False
+
 def tables_and_numbering(root):
+    # tailles génériques des tableaux
     for tbl in root.findall(".//w:tbl", NS):
         rows = tbl.findall(".//w:tr", NS)
         if not rows:
@@ -366,12 +414,21 @@ def tables_and_numbering(root):
             for p in tr.findall(".//w:p", NS):
                 for r in p.findall(".//w:r", NS):
                     set_run_props(r, size=9)
-    for p in root.findall(".//w:p", NS):
-        if ROMAN_RE.match(get_text(p).strip() or ""):
-            for r in p.findall(".//w:r", NS):
-                set_run_props(r, size=10, bold=True, italic=True, color="FFFFFF")
 
-# ───────────────────────── Couleurs (helpers) ──────────────────────
+    # Ligne d'en-tête à fond bleu foncé qui commence par "I. Titre ..."
+    parent_map = {child: parent for parent in root.iter() for child in parent}
+    for p in root.findall(".//w:p", NS):
+        txt = get_text(p).strip()
+        if not txt:
+            continue
+        if not ROMAN_TITLE_RE.match(txt):
+            continue
+        if not _para_or_cell_has_dark_bg(p, parent_map):
+            continue
+        for r in p.findall(".//w:r", NS):
+            set_run_props(r, size=10, bold=True, italic=True, color="FFFFFF")
+
+# ───────────────────────── Helpers couleurs formes ─────────────────
 def _pct(val: Optional[str]) -> float:
     try:
         return max(0.0, min(1.0, int(val)/100000.0))
@@ -649,7 +706,7 @@ def force_footer_size_10(root):
         set_run_props(r, size=10)
     set_dml_text_size(root, 10.0)
 
-# ───────────────────────── Suppression mégaphones (NOUVEAU) ────────
+# ───────────────────────── Suppression mégaphones ──────────────────
 def _sha1(b: bytes) -> str:
     return hashlib.sha1(b).hexdigest()
 
@@ -673,18 +730,16 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
     except ET.ParseError:
         return
 
-    # Map rId -> full media path
+    # Map rId -> chemin media
     rmap: Dict[str, str] = {}
     for rel in rels_root.findall(f".//{{{P_REL}}}Relationship"):
         rid = rel.get("Id") or ""
         tgt = rel.get("Target") or ""
         rmap[rid] = _resolve_target_path(part_name, tgt)
 
-    # parent map to remove <w:drawing>
     parent_map = {child: parent for parent in root.iter() for child in parent}
     removed_rids: Set[str] = set()
 
-    # Iterate all pictures
     for blip in root.findall(".//a:blip", NS):
         rid = blip.get(f"{{{R}}}embed")
         if not rid or rid not in rmap:
@@ -695,7 +750,6 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
         data = parts[media_path]
         match_hash = _sha1(data) in megaphone_hashes if megaphone_hashes else False
 
-        # Find enclosing holder + drawing to check size & remove safely
         holder = None
         node = blip
         while node is not None:
@@ -709,7 +763,6 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
                 drawing = node2; break
             node2 = parent_map.get(node2)
 
-        # Heuristic on very small icon size and file size
         is_tiny = False
         if holder is not None:
             extent = holder.find("wp:extent", NS)
@@ -730,7 +783,6 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
                 parent.remove(drawing)
                 removed_rids.add(rid)
 
-    # Remove Relationships for deleted drawings (leave media bytes intact = safe)
     if removed_rids:
         for rel in list(rels_root.findall(f".//{{{P_REL}}}Relationship")):
             if (rel.get("Id") or "") in removed_rids:
@@ -755,7 +807,6 @@ def process_bytes(
 
     theme_colors = extract_theme_colors(parts)
 
-    # Prépare les hashes des exemples d'icônes mégaphone (optionnels)
     megaphone_hashes: Set[str] = set()
     if megaphone_samples:
         for b in megaphone_samples:
@@ -764,7 +815,6 @@ def process_bytes(
             except Exception:
                 pass
 
-    # Traite chaque XML
     for name, data in list(parts.items()):
         if not name.endswith(".xml"):
             continue
@@ -773,20 +823,21 @@ def process_bytes(
         except ET.ParseError:
             continue
 
-        # TEXTE & FORMATS
-        replace_years(root)  # <- couvre aussi les pieds de page et les formes
+        # Texte & formats
+        replace_years(root)  # couvre tout, y compris pieds de page
         strip_actualisation_everywhere(root)
         force_calibri(root)
-        red_to_black(root)  # texte rouge/bleu → noir
+        red_to_black(root)
 
         if name == "word/document.xml":
             cover_sizes_cleanup(root)
             tune_cover_shapes_spatial(root)
             tables_and_numbering(root)
+            force_course_name_after_title_20(root)
+            force_title_fiche_de_cours_22(root)
             reposition_small_icon(root, icon_left, icon_top)
             remove_large_grey_rectangles(root, theme_colors)
             force_red_bullets_black_in_paragraphs(root)
-            force_title_fiche_de_cours_22(root)
 
         if name == "word/numbering.xml":
             force_red_bullets_black_in_numbering(root)
@@ -797,12 +848,12 @@ def process_bytes(
         if name.startswith("word/footer"):
             force_footer_size_10(root)
 
-        # NOUVEAU : purge des petites icônes mégaphone (par part)
+        # Suppression mégaphones dans cette part
         _remove_megaphones_in_part(parts, name, root, megaphone_hashes)
 
         parts[name] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
-    # Légende optionnelle (inchangé)
+    # Légende optionnelle
     if legend_bytes and "word/document.xml" in parts and "word/_rels/document.xml.rels" in parts:
         parts["word/document.xml"] = remove_legend_text(parts["word/document.xml"])
         new_doc, new_rels, media = insert_legend_image(
@@ -837,7 +888,7 @@ def cleaned_filename(original_name: str) -> str:
 # ───────────────────────── Interface Streamlit ─────────────────────
 st.set_page_config(page_title="Fiches Diploma", page_icon="🧠", layout="centered")
 st.title("🧠 Fiches Diploma")
-st.caption("Transforme tes .docx 2024-2025 en 2025-2026 (couleurs, puces, tailles, rectangle gris, légende, etc.) + suppression mégaphones, années en pied de page mises à jour.")
+st.caption("Transforme tes .docx 2024-2025 en 2025-2026 (couleurs, puces, tailles, rectangle gris, légende, mégaphones, etc.).")
 
 with st.sidebar:
     st.subheader("Paramètres (cm)")
