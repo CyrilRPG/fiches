@@ -83,7 +83,6 @@ def normalize_spaces(s: str) -> str:
     return s
 
 def _norm_matchable(s: str) -> str:
-    """Minuscule, sans accents, espaces normalisés, NBSP→espace."""
     s = s.replace("\u00A0", " ")
     s = unicodedata.normalize("NFKD", s)
     s = "".join(ch for ch in s if not unicodedata.combining(ch))
@@ -182,7 +181,7 @@ def force_red_bullets_black_in_numbering(root):
             for a in ("themeColor","themeTint","themeShade"):
                 col.attrib.pop(f"{{{W}}}{a}", None)
 
-# ── 2) Puces rouges → noires : styles de liste (styles.xml)
+# ── 2) Puces rouges → noires : styles de liste (styles.xml) — sans prédicat XPath
 def force_red_bullets_black_in_styles(root):
     CANDIDATES = {"list","bullet","puce","puces","liste"}
     RED_HEX = {"FF0000","C00000","CC0000","E60000","ED1C24","F44336","DC143C","B22222","E74C3C","D0021B"}
@@ -190,7 +189,9 @@ def force_red_bullets_black_in_styles(root):
         if not rgb: return False
         r,g,b = rgb
         return (r >= 170 and g <= 110 and b <= 110)
-    for st in root.findall(".//w:style[@w:type='paragraph']", NS):
+    for st in root.findall(".//w:style", NS):
+        if (st.get(f"{{{W}}}type") or "") != "paragraph":
+            continue
         name_el = st.find("w:name", NS)
         style_id = (st.get(f"{{{W}}}styleId") or "").lower()
         style_name = (name_el.get(f"{{{W}}}val") if name_el is not None else "").lower()
@@ -344,12 +345,10 @@ def tune_cover_shapes_spatial(root):
 
 # ───────────────────────── Forçage titre « fiche de cours » à 22 pt ─
 def force_title_fiche_de_cours_22(root):
-    # Paragraphe w:p
     for p in root.findall(".//w:p", NS):
         if "fiche de cours" in _norm_matchable(get_text(p)):
             for r in p.findall(".//w:r", NS):
                 set_run_props(r, size=22)
-    # Formes (DrawingML / WPS)
     for holder in root.findall(".//wp:anchor", NS) + root.findall(".//wp:inline", NS):
         txt = get_tx_text(holder)
         if txt and "fiche de cours" in _norm_matchable(txt):
@@ -430,9 +429,15 @@ def _resolve_solid_fill_color(spPr: ET.Element, theme_colors: Dict[str,str]) -> 
                                          lo.get("val") if lo is not None else None)
     return None
 
-def _shape_has_text(holder: ET.Element) -> bool:
-    txt = get_tx_text(holder)
-    return bool(txt.strip())
+def _shape_has_text(holder_or_sp: ET.Element) -> bool:
+    # accepte un holder (wp:anchor/wp:inline) ou une forme a:sp
+    if holder_or_sp.tag == f"{{{A}}}sp":
+        tx = holder_or_sp.find(".//a:txBody", NS)
+        if tx is not None:
+            joined = "".join(t.text or "" for t in tx.findall(".//a:t", NS)).strip()
+            return bool(joined)
+        return False
+    return bool(get_tx_text(holder_or_sp).strip())
 
 # ───────────────────────── Thème ───────────────────────────────────
 def extract_theme_colors(parts: Dict[str, bytes]) -> Dict[str, str]:
@@ -458,18 +463,30 @@ def extract_theme_colors(parts: Dict[str, bytes]) -> Dict[str, str]:
                 colors[tag.lower()] = sysc.get("lastClr", "").upper()
     return colors
 
-# ───────────────────────── Suppression rectangle gris ──────────────
+# ───────────────────────── Suppression rectangle gris — SAFE ───────
 def remove_large_grey_rectangles(root: ET.Element, theme_colors: Dict[str, str]):
+    """
+    Supprime UNIQUEMENT la forme 'a:sp' rect/roundRect gris clair (#F2F2F2±) SANS TEXTE,
+    à droite et grande. Ne supprime JAMAIS le <w:drawing> complet s'il contient d'autres formes.
+    Idem VML: suppression ciblée du <v:shape>, pas du <w:pict>.
+    """
+    # parent map
     parent_map = {child: parent for parent in root.iter() for child in parent}
+
+    def looks_target_gray(rgb: Optional[Tuple[int,int,int]]) -> bool:
+        return rgb is not None and \
+               abs(rgb[0]-0xF2) <= 12 and abs(rgb[1]-0xF2) <= 12 and abs(rgb[2]-0xF2) <= 12
+
+    # DML
     for drawing in root.findall(".//w:drawing", NS):
         holder = drawing.find(".//wp:anchor", NS) or drawing.find(".//wp:inline", NS)
         if holder is None:
             continue
+        # Ignore dessins qui contiennent des images
         if holder.find(".//pic:pic", NS) is not None:
             continue
-        prst = holder.find(".//a:prstGeom", NS)
-        if prst is None or prst.get("prst") not in ("rect", "roundRect"):
-            continue
+
+        # Position & taille du HOLDER (filtre spatial global, on ne l'utilise pas pour supprimer)
         extent = holder.find("wp:extent", NS)
         if extent is None:
             continue
@@ -477,28 +494,54 @@ def remove_large_grey_rectangles(root: ET.Element, theme_colors: Dict[str, str])
             cx = int(extent.get("cx", "0")); cy = int(extent.get("cy", "0"))
         except Exception:
             continue
-        width_cm  = emu_to_cm(cx); height_cm = emu_to_cm(cy)
+        width_cm  = emu_to_cm(cx)
+        height_cm = emu_to_cm(cy)
         x_el = holder.find(".//wp:positionH/wp:posOffset", NS)
         try:
             x_cm = emu_to_cm(int(x_el.text)) if x_el is not None else 0.0
         except Exception:
             x_cm = 0.0
-        if _shape_has_text(holder):
-            continue
-        spPr = holder.find(".//a:spPr", NS) or holder.find(".//wps:spPr", NS)
-        if spPr is None:
-            for el in holder.iter():
-                if el.tag.endswith("spPr"):
-                    spPr = el; break
-        rgb = _resolve_solid_fill_color(spPr, theme_colors)
-        looks_gray = rgb is not None and \
-                     abs(rgb[0]-0xF2) <= 12 and abs(rgb[1]-0xF2) <= 12 and abs(rgb[2]-0xF2) <= 12
-        on_right   = x_cm >= 9.0
-        big_enough = (width_cm >= 7.0 and height_cm >= 12.0)
-        if looks_gray and on_right and big_enough:
-            parent = parent_map.get(drawing)
-            if parent is not None:
-                parent.remove(drawing)
+
+        # On parcourt chaque shape a:sp à l'intérieur et on ne retire QUE celles qui matchent.
+        removed_any = False
+        # Les a:sp sont dans a:spTree (parfois dans a:grpSp/a:spTree)
+        for sp in holder.findall(".//a:sp", NS):
+            # pas d'image
+            # géométrie rect
+            prst = sp.find(".//a:prstGeom", NS)
+            if prst is None or prst.get("prst") not in ("rect", "roundRect"):
+                continue
+            # doit être sans texte
+            if _shape_has_text(sp):
+                continue
+            # couleur de remplissage
+            spPr = sp.find("a:spPr", NS)
+            rgb = _resolve_solid_fill_color(spPr, theme_colors)
+            if not looks_target_gray(rgb):
+                continue
+            # filtres spatiaux globaux (on-right & big-enough sur BBOX global)
+            on_right   = x_cm >= 9.0
+            big_enough = (width_cm >= 7.0 and height_cm >= 12.0)
+            if not (on_right and big_enough):
+                continue
+            # supprimer uniquement ce sp
+            p = parent_map.get(sp)
+            if p is not None:
+                p.remove(sp)
+                removed_any = True
+
+        # Si le holder ne contient plus aucune forme ni texte après suppression ET ne contient pas d'image,
+        # on peut supprimer prudemment le <w:drawing>.
+        if removed_any:
+            # re-évaluer: reste-t-il a:sp ou wps:txbx ou texte ?
+            still_text = _shape_has_text(holder)
+            still_sp = holder.find(".//a:sp", NS) is not None
+            if (not still_text) and (not still_sp) and (holder.find(".//pic:pic", NS) is None):
+                parent = parent_map.get(drawing)
+                if parent is not None:
+                    parent.remove(drawing)
+
+    # VML — supprimer uniquement la forme ciblée, pas tout le pict
     for pict in root.findall(".//w:pict", NS):
         for tag in ("rect", "roundrect", "shape"):
             for shape in pict.findall(f".//v:{tag}", NS):
@@ -510,15 +553,19 @@ def remove_large_grey_rectangles(root: ET.Element, theme_colors: Dict[str, str])
                     continue
                 w = float(m_w.group(1)); h = float(m_h.group(1))
                 left_cm = float(m_l.group(1)) if m_l else 0.0
+                # couleur
                 fill_attr = (shape.get("fillcolor") or "").lstrip("#")
                 rgb = _hex_to_rgb(fill_attr.upper())
-                looks_gray = rgb is not None and \
-                             abs(rgb[0]-0xF2) <= 12 and abs(rgb[1]-0xF2) <= 12 and abs(rgb[2]-0xF2) <= 12
+                if not looks_target_gray(rgb):
+                    continue
+                # ne pas toucher aux shapes avec textbox
                 has_txbx = shape.find(".//w:txbxContent", NS) is not None
-                if looks_gray and not has_txbx and left_cm >= 9.0 and w >= 7.0 and h >= 12.0:
-                    parent = parent_map.get(pict)
-                    if parent is not None:
-                        parent.remove(pict)
+                if has_txbx:
+                    continue
+                if left_cm >= 9.0 and w >= 7.0 and h >= 12.0:
+                    p = parent_map.get(shape)
+                    if p is not None:
+                        p.remove(shape)
 
 # ───────────────────────── Légende (optionnelle) ───────────────────
 def build_anchored_image(rId, width_cm, height_cm, left_cm, top_cm, name="Legende"):
@@ -568,7 +615,12 @@ def remove_legend_text(document_xml: bytes) -> bytes:
         if get_text(p).strip().lower() == "légendes":
             for t in p.findall(".//w:t", NS):
                 t.text = ""
-    lines = {"Notion nouvelle cette année","Notion hors programme","Notion déjà tombée au concours","Astuces et méthodes"}
+    lines = {
+        "Notion nouvelle cette année",
+        "Notion hors programme",
+        "Notion déjà tombée au concours",
+        "Astuces et méthodes",
+    }
     for p in root.findall(".//w:p", NS):
         if get_text(p).strip() in lines:
             for t in p.findall(".//w:t", NS):
@@ -576,8 +628,13 @@ def remove_legend_text(document_xml: bytes) -> bytes:
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 def insert_legend_image(
-    document_xml: bytes, rels_xml: bytes, image_bytes: bytes,
-    left_cm=2.3, top_cm=23.8, width_cm=5.68, height_cm=3.77,
+    document_xml: bytes,
+    rels_xml: bytes,
+    image_bytes: bytes,
+    left_cm=2.3,
+    top_cm=23.8,
+    width_cm=5.68,
+    height_cm=3.77,
 ) -> Tuple[bytes, bytes, Tuple[str, bytes]]:
     root = ET.fromstring(document_xml)
     rels = ET.fromstring(rels_xml)
@@ -585,22 +642,29 @@ def insert_legend_image(
     idx = None
     for i, p in enumerate(paras):
         if get_text(p).strip().lower().startswith("légendes"):
-            idx = i; break
-    if idx is None and paras: idx = 0
+            idx = i
+            break
+    if idx is None and paras:
+        idx = 0
+
     nums = []
     for rel in rels.findall(f".//{{{P_REL}}}Relationship"):
         rid = rel.get("Id", "")
         if rid.startswith("rId"):
-            try: nums.append(int(rid[3:]))
-            except Exception: pass
+            try:
+                nums.append(int(rid[3:]))
+            except Exception:
+                pass
     new_rid = f"rId{(max(nums) if nums else 0) + 1}"
     media_name = "media/image_legende.png"
     rel = ET.SubElement(rels, f"{{{P_REL}}}Relationship")
     rel.set("Id", new_rid)
     rel.set("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image")
     rel.set("Target", media_name)
+
     drawing = build_anchored_image(new_rid, width_cm, height_cm, left_cm, top_cm, "Legende")
     (ET.SubElement(paras[idx], f"{{{W}}}r") if idx is not None else ET.SubElement(ET.SubElement(root, f"{{{W}}}p"), f"{{{W}}}r")).append(drawing)
+
     return (
         ET.tostring(root, encoding="utf-8", xml_declaration=True),
         ET.tostring(rels, encoding="utf-8", xml_declaration=True),
@@ -615,7 +679,8 @@ def reposition_small_icon(root, left_cm=15.3, top_cm=11.0):
         if extent is None:
             continue
         try:
-            cx = int(extent.get("cx", "0")); cy = int(extent.get("cy", "0"))
+            cx = int(extent.get("cx", "0"))
+            cy = int(extent.get("cy", "0"))
         except Exception:
             continue
         if anchor.find(".//pic:pic", NS) is None:
@@ -625,7 +690,8 @@ def reposition_small_icon(root, left_cm=15.3, top_cm=11.0):
         x = anchor.findtext("wp:positionH/wp:posOffset", default="0", namespaces=NS)
         y = anchor.findtext("wp:positionV/wp:posOffset", default="0", namespaces=NS)
         try:
-            x_cm = emu_to_cm(int(x)); y_cm = emu_to_cm(int(y))
+            x_cm = emu_to_cm(int(x))
+            y_cm = emu_to_cm(int(y))
         except Exception:
             x_cm, y_cm = 0.0, 0.0
         cand.append((x_cm, y_cm, anchor))
@@ -633,12 +699,15 @@ def reposition_small_icon(root, left_cm=15.3, top_cm=11.0):
         return
     chosen = max(cand, key=lambda t: t[0])
     anchor = chosen[2]
+
     posH = anchor.find("wp:positionH", NS) or ET.SubElement(anchor, f"{{{WP}}}positionH")
-    for ch in list(posH): posH.remove(ch)
+    for ch in list(posH):
+        posH.remove(ch)
     posH.set("relativeFrom", "page")
     ET.SubElement(posH, f"{{{WP}}}posOffset").text = str(cm_to_emu(left_cm))
     posV = anchor.find("wp:positionV", NS) or ET.SubElement(anchor, f"{{{WP}}}positionV")
-    for ch in list(posV): posV.remove(ch)
+    for ch in list(posV):
+        posV.remove(ch)
     posV.set("relativeFrom", "page")
     ET.SubElement(posV, f"{{{WP}}}posOffset").text = str(cm_to_emu(top_cm))
 
@@ -694,14 +763,12 @@ def process_bytes(
             remove_large_grey_rectangles(root, theme_colors)
             # Puces rouges -> noires au niveau des paragraphes
             force_red_bullets_black_in_paragraphs(root)
-            # Forçage final du titre « fiche de cours » à 22 pt (paragraphe + formes)
+            # Forçage final du titre « fiche de cours » à 22 pt
             force_title_fiche_de_cours_22(root)
 
-        # Puces rouges -> noires (définitions)
         if name == "word/numbering.xml":
             force_red_bullets_black_in_numbering(root)
 
-        # Puces rouges -> noires (styles)
         if name == "word/styles.xml":
             force_red_bullets_black_in_styles(root)
 
