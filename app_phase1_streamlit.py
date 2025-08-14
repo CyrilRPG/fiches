@@ -24,8 +24,10 @@ for k, v in NS.items():
     ET.register_namespace(k, v)
 
 # ───────────────────────── Règles/constantes ───────────────────────
-# Remplacement d'années : on utilisera REGEX pour être robuste aux espaces
-YEAR_PAT = re.compile(r"2024[\u00A0\s]*-[\u00A0\s]*2025")
+# Remplacement d'années : robuste aux NBSP/espaces fines et à tous les tirets/dashes
+YEAR_PAT = re.compile(
+    r"2024(?:[\u00A0\u2007\u202F\s]*[\-\u2010\u2011\u2012\u2013\u2014\u2212][\u00A0\u2007\u202F\s]*)2025"
+)
 REPL = "2025 - 2026"
 ROMAN_RE = re.compile(r"^\s*[IVXLC]+\s*[.)]?\s+.+", re.IGNORECASE)
 
@@ -94,14 +96,25 @@ def _norm_matchable(s: str) -> str:
 
 # ───────────────────────── Remplacements texte ─────────────────────
 def replace_years(root):
-    # Tous les w:t
-    for t in root.findall(".//w:t", NS):
-        if t.text:
-            t.text = YEAR_PAT.sub(REPL, t.text)
-    # Tous les a:t (texte dans shapes DML)
-    for t in root.findall(".//a:t", NS):
-        if t.text:
-            t.text = YEAR_PAT.sub(REPL, t.text)
+    # 1) Paragraphe Word : joint tous les w:t pour gérer les coupures sur plusieurs runs
+    for p in root.findall(".//w:p", NS):
+        wts = p.findall(".//w:t", NS)
+        if not wts:
+            continue
+        txt = "".join(t.text or "" for t in wts)
+        new = YEAR_PAT.sub(REPL, txt)
+        if new != txt:
+            redistribute(wts, new)
+
+    # 2) Texte de formes DrawingML : traite par bloc de a:txBody (concatène les a:t)
+    for tx in root.findall(".//a:txBody", NS):
+        ats = tx.findall(".//a:t", NS)
+        if not ats:
+            continue
+        txt = "".join(t.text or "" for t in ats)
+        new = YEAR_PAT.sub(REPL, txt)
+        if new != txt:
+            redistribute(ats, new)
 
 def strip_actualisation_everywhere(root):
     for t in root.findall(".//w:t", NS) + root.findall(".//a:t", NS):
@@ -286,7 +299,7 @@ def cover_sizes_cleanup(root):
         if last_was_fiche and txt:
             set_size(paras[i], 20)
             last_was_fiche = False
-        if "université" in low and YEAR_PAT.search(txt.replace("\u00A0"," ")):
+        if "université" in low and YEAR_PAT.search(txt):
             set_size(paras[i], 10)
 
 # ───────────────────────── Couverture : formes DML/WPS (spatial) ──
@@ -303,7 +316,7 @@ def tune_cover_shapes_spatial(root):
     holders.sort(key=lambda t: (t[0], t[1]))
     for _, _, h, txt in holders:
         low = txt.lower()
-        if ("universite" in low or "université" in low) and YEAR_PAT.search(txt.replace("\u00A0"," ")):
+        if ("universite" in low or "université" in low) and YEAR_PAT.search(txt):
             set_tx_size(h, 10.0)
     idx_fiche = None
     for i, (_, _, h, txt) in enumerate(holders):
@@ -761,7 +774,7 @@ def process_bytes(
             continue
 
         # TEXTE & FORMATS
-        replace_years(root)  # <- couvre aussi les pieds de page
+        replace_years(root)  # <- couvre aussi les pieds de page et les formes
         strip_actualisation_everywhere(root)
         force_calibri(root)
         red_to_black(root)  # texte rouge/bleu → noir
