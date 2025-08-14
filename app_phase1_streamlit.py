@@ -9,23 +9,16 @@ from typing import Dict, Tuple, List, Optional
 import streamlit as st
 
 # ───────────────────────── Espaces de noms ─────────────────────────
-W    = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-WP   = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
-A    = "http://schemas.openxmlformats.org/drawingml/2006/main"
-PIC  = "http://schemas.openxmlformats.org/drawingml/2006/picture"
-R    = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-P_REL= "http://schemas.openxmlformats.org/package/2006/relationships"
-WPS  = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
-VML  = "urn:schemas-microsoft-com:vml"
-MC   = "http://schemas.openxmlformats.org/markup-compatibility/2006"
-WP14 = "http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing"
-W14  = "http://schemas.microsoft.com/office/word/2010/wordprocessingml"
-W15  = "http://schemas.microsoft.com/office/word/2012/wordml"
+W   = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+WP  = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+A   = "http://schemas.openxmlformats.org/drawingml/2006/main"
+PIC = "http://schemas.openxmlformats.org/drawingml/2006/picture"
+R   = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+P_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
+WPS = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+VML_NS = "urn:schemas-microsoft-com:vml"
 
-NS = {
-    "w": W, "wp": WP, "a": A, "pic": PIC, "r": R, "wps": WPS, "v": VML,
-    "mc": MC, "wp14": WP14, "w14": W14, "w15": W15
-}
+NS = {"w": W, "wp": WP, "a": A, "pic": PIC, "r": R, "wps": WPS, "v": VML_NS}
 for k, v in NS.items():
     ET.register_namespace(k, v)
 
@@ -120,7 +113,6 @@ def replace_years(root):
             redistribute(ats, new)
 
 def strip_actualisation_everywhere(root):
-    """Supprime ACTUALISATION / NOUVELLE FICHE dans w:t et a:t."""
     for t in root.findall(".//w:t", NS) + root.findall(".//a:t", NS):
         if t.text:
             t.text = re.sub(r"(?iu)\b(actualisation|nouvelle\s+fiche)\b", "", t.text)
@@ -168,7 +160,7 @@ def red_to_black(root):
             for a in ("themeColor", "themeTint", "themeShade"):
                 c.attrib.pop(f"{{{W}}}{a}", None)
 
-# ── Puces rouges → noires (3 couches)
+# ── 1) Puces rouges → noires : numbering.xml
 def force_red_bullets_black_in_numbering(root):
     RED_HEX = {"FF0000","C00000","CC0000","E60000","ED1C24","F44336","DC143C","B22222","E74C3C","D0021B"}
     def looks_red(rgb: Tuple[int,int,int]) -> bool:
@@ -190,6 +182,7 @@ def force_red_bullets_black_in_numbering(root):
             for a in ("themeColor","themeTint","themeShade"):
                 col.attrib.pop(f"{{{W}}}{a}", None)
 
+# ── 2) Puces rouges → noires : styles de liste (styles.xml)
 def force_red_bullets_black_in_styles(root):
     CANDIDATES = {"list","bullet","puce","puces","liste"}
     RED_HEX = {"FF0000","C00000","CC0000","E60000","ED1C24","F44336","DC143C","B22222","E74C3C","D0021B"}
@@ -221,6 +214,7 @@ def force_red_bullets_black_in_styles(root):
             for a in ("themeColor","themeTint","themeShade"):
                 col.attrib.pop(f"{{{W}}}{a}", None)
 
+# ── 3) Puces rouges → noires : au niveau des paragraphes numérotés
 def force_red_bullets_black_in_paragraphs(root):
     RED_HEX = {"FF0000","C00000","CC0000","E60000","ED1C24","F44336","DC143C","B22222","E74C3C","D0021B"}
     def looks_red(rgb: Tuple[int,int,int]) -> bool:
@@ -336,7 +330,6 @@ def tune_cover_shapes_spatial(root):
             if txt_next and "fiche de cours" not in txt_next.lower():
                 set_tx_size(holders[j][2], 20.0)
                 break
-    # nettoyage mentions
     for _, _, h, _ in holders:
         tx = h.find(".//a:txBody", NS)
         if tx is not None:
@@ -404,7 +397,6 @@ def _apply_lum(base_rgb: Tuple[int,int,int], lumMod: Optional[str], lumOff: Opti
 def _resolve_solid_fill_color(spPr: ET.Element, theme_colors: Dict[str,str]) -> Optional[Tuple[int,int,int]]:
     if spPr is None:
         return None
-    # a:solidFill où qu'il soit sous spPr
     solid = None
     for el in spPr.iter():
         if el.tag == f"{{{A}}}solidFill":
@@ -412,7 +404,6 @@ def _resolve_solid_fill_color(spPr: ET.Element, theme_colors: Dict[str,str]) -> 
             break
     if solid is None:
         return None
-    # RGB direct
     srgb = solid.find("a:srgbClr", NS)
     if srgb is not None and srgb.get("val"):
         rgb = _hex_to_rgb(srgb.get("val"))
@@ -421,7 +412,6 @@ def _resolve_solid_fill_color(spPr: ET.Element, theme_colors: Dict[str,str]) -> 
             rgb = _apply_lum(rgb, lm.get("val") if lm is not None else None,
                                   lo.get("val") if lo is not None else None)
         return rgb
-    # Couleur de thème
     scheme = solid.find("a:schemeClr", NS)
     if scheme is not None:
         base_hex = theme_colors.get((scheme.get("val") or "").lower())
@@ -430,7 +420,6 @@ def _resolve_solid_fill_color(spPr: ET.Element, theme_colors: Dict[str,str]) -> 
         if base_rgb:
             return _apply_lum(base_rgb, lm.get("val") if lm is not None else None,
                                          lo.get("val") if lo is not None else None)
-    # sysClr
     sysc = solid.find("a:sysClr", NS)
     if sysc is not None:
         base_hex = sysc.get("lastClr") or sysc.get("val")
@@ -471,29 +460,16 @@ def extract_theme_colors(parts: Dict[str, bytes]) -> Dict[str, str]:
 
 # ───────────────────────── Suppression rectangle gris ──────────────
 def remove_large_grey_rectangles(root: ET.Element, theme_colors: Dict[str, str]):
-    """
-    Supprime UNIQUEMENT le grand rectangle gris clair (#F2F2F2 ± tol.) de la couverture,
-    et uniquement s'il est derrière le doc (behindDoc="1"), sans texte, rect/roundRect.
-    """
     parent_map = {child: parent for parent in root.iter() for child in parent}
-
-    # DML
     for drawing in root.findall(".//w:drawing", NS):
         holder = drawing.find(".//wp:anchor", NS) or drawing.find(".//wp:inline", NS)
         if holder is None:
             continue
         if holder.find(".//pic:pic", NS) is not None:
             continue
-
-        # behindDoc doit être "1" (sécurité ++)
-        if holder.tag == f"{{{WP}}}anchor":
-            if holder.get("behindDoc", "0") != "1":
-                continue
-
         prst = holder.find(".//a:prstGeom", NS)
         if prst is None or prst.get("prst") not in ("rect", "roundRect"):
             continue
-
         extent = holder.find("wp:extent", NS)
         if extent is None:
             continue
@@ -502,34 +478,27 @@ def remove_large_grey_rectangles(root: ET.Element, theme_colors: Dict[str, str])
         except Exception:
             continue
         width_cm  = emu_to_cm(cx); height_cm = emu_to_cm(cy)
-
         x_el = holder.find(".//wp:positionH/wp:posOffset", NS)
         try:
             x_cm = emu_to_cm(int(x_el.text)) if x_el is not None else 0.0
         except Exception:
             x_cm = 0.0
-
         if _shape_has_text(holder):
             continue
-
         spPr = holder.find(".//a:spPr", NS) or holder.find(".//wps:spPr", NS)
         if spPr is None:
             for el in holder.iter():
                 if el.tag.endswith("spPr"):
                     spPr = el; break
-
         rgb = _resolve_solid_fill_color(spPr, theme_colors)
         looks_gray = rgb is not None and \
                      abs(rgb[0]-0xF2) <= 12 and abs(rgb[1]-0xF2) <= 12 and abs(rgb[2]-0xF2) <= 12
         on_right   = x_cm >= 9.0
         big_enough = (width_cm >= 7.0 and height_cm >= 12.0)
-
         if looks_gray and on_right and big_enough:
             parent = parent_map.get(drawing)
             if parent is not None:
                 parent.remove(drawing)
-
-    # VML (rare) – pas behindDoc dispo, on garde critères stricts
     for pict in root.findall(".//w:pict", NS):
         for tag in ("rect", "roundrect", "shape"):
             for shape in pict.findall(f".//v:{tag}", NS):
@@ -551,45 +520,8 @@ def remove_large_grey_rectangles(root: ET.Element, theme_colors: Dict[str, str])
                     if parent is not None:
                         parent.remove(pict)
 
-# ───────────────────────── Légende (texte → vide + image) ──────────
-LEGEND_LINES = {
-    "Légendes",
-    "Notion nouvelle cette année",
-    "Notion hors programme",
-    "Notion déjà tombée au concours",
-    "Astuces et méthodes",
-}
-def _is_legend_line(s: str) -> bool:
-    s_norm = _norm_matchable(s)
-    for ref in LEGEND_LINES:
-        if _norm_matchable(ref) == s_norm or s_norm.startswith(_norm_matchable(ref)):
-            return True
-    return False
-
-def remove_legend_text_everywhere(root: ET.Element) -> None:
-    # Paragraphe normal
-    for p in root.findall(".//w:p", NS):
-        if _is_legend_line(get_text(p).strip()):
-            for t in p.findall(".//w:t", NS):
-                t.text = ""
-    # Textboxes (WPS)
-    for tx in root.findall(".//wps:txbx/w:txbxContent", NS):
-        for p in tx.findall(".//w:p", NS):
-            if _is_legend_line(get_text(p).strip()):
-                for t in p.findall(".//w:t", NS):
-                    t.text = ""
-
-def _max_existing_docpr_id(root: ET.Element) -> int:
-    max_id = 0
-    for dp in root.findall(".//wp:docPr", NS):
-        try:
-            v = int(dp.get("id", "0"))
-            if v > max_id: max_id = v
-        except Exception:
-            pass
-    return max_id
-
-def build_anchored_image(rId, width_cm, height_cm, left_cm, top_cm, name="Legende", docpr_id=1000):
+# ───────────────────────── Légende (optionnelle) ───────────────────
+def build_anchored_image(rId, width_cm, height_cm, left_cm, top_cm, name="Legende"):
     cx, cy = cm_to_emu(width_cm), cm_to_emu(height_cm)
     xoff, yoff = cm_to_emu(left_cm), cm_to_emu(top_cm)
     drawing = ET.Element(f"{{{W}}}drawing")
@@ -610,7 +542,7 @@ def build_anchored_image(rId, width_cm, height_cm, left_cm, top_cm, name="Legend
     ET.SubElement(anchor, f"{{{WP}}}extent", {"cx": str(cx), "cy": str(cy)})
     ET.SubElement(anchor, f"{{{WP}}}effectExtent", {"l": "0", "t": "0", "r": "0", "b": "0"})
     ET.SubElement(anchor, f"{{{WP}}}wrapNone")
-    ET.SubElement(anchor, f"{{{WP}}}docPr", {"id": str(docpr_id), "name": name})
+    ET.SubElement(anchor, f"{{{WP}}}docPr", {"id": "10", "name": name})
     ET.SubElement(anchor, f"{{{WP}}}cNvGraphicFramePr")
     graphic = ET.SubElement(anchor, f"{{{A}}}graphic")
     gData = ET.SubElement(graphic, f"{{{A}}}graphicData", {"uri": "http://schemas.openxmlformats.org/drawingml/2006/picture"})
@@ -618,7 +550,7 @@ def build_anchored_image(rId, width_cm, height_cm, left_cm, top_cm, name="Legend
     nvPicPr = ET.SubElement(pic, f"{{{PIC}}}nvPicPr")
     ET.SubElement(nvPicPr, f"{{{PIC}}}cNvPr", {"id": "0", "name": name + ".img"})
     ET.SubElement(nvPicPr, f"{{{PIC}}}cNvPicPr")
-    blipFill = ET.SubElement(pic, f"{{{PIC}}}blipFill")
+    blipFill = ET.SubElement(pic, f"{{{PIC}}}blipFill"})
     ET.SubElement(blipFill, f"{{{A}}}blip", {f"{{{R}}}embed": rId})
     stretch = ET.SubElement(blipFill, f"{{{A}}}stretch")
     ET.SubElement(stretch, f"{{{A}}}fillRect")
@@ -630,58 +562,45 @@ def build_anchored_image(rId, width_cm, height_cm, left_cm, top_cm, name="Legend
     ET.SubElement(prst, f"{{{A}}}avLst")
     return drawing
 
+def remove_legend_text(document_xml: bytes) -> bytes:
+    root = ET.fromstring(document_xml)
+    for p in root.findall(".//w:p", NS):
+        if get_text(p).strip().lower() == "légendes":
+            for t in p.findall(".//w:t", NS):
+                t.text = ""
+    lines = {"Notion nouvelle cette année","Notion hors programme","Notion déjà tombée au concours","Astuces et méthodes"}
+    for p in root.findall(".//w:p", NS):
+        if get_text(p).strip() in lines:
+            for t in p.findall(".//w:t", NS):
+                t.text = ""
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
 def insert_legend_image(
-    document_xml: bytes,
-    rels_xml: bytes,
-    image_bytes: bytes,
-    left_cm=2.3,
-    top_cm=23.8,
-    width_cm=5.68,
-    height_cm=3.77,
+    document_xml: bytes, rels_xml: bytes, image_bytes: bytes,
+    left_cm=2.3, top_cm=23.8, width_cm=5.68, height_cm=3.77,
 ) -> Tuple[bytes, bytes, Tuple[str, bytes]]:
     root = ET.fromstring(document_xml)
     rels = ET.fromstring(rels_xml)
-
-    # 1) Effacer textes de légende partout (p + textboxes)
-    remove_legend_text_everywhere(root)
-
-    # 2) rId unique
+    paras = root.findall(".//w:p", NS)
+    idx = None
+    for i, p in enumerate(paras):
+        if get_text(p).strip().lower().startswith("légendes"):
+            idx = i; break
+    if idx is None and paras: idx = 0
     nums = []
     for rel in rels.findall(f".//{{{P_REL}}}Relationship"):
         rid = rel.get("Id", "")
         if rid.startswith("rId"):
-            try:
-                nums.append(int(rid[3:]))
-            except Exception:
-                pass
+            try: nums.append(int(rid[3:]))
+            except Exception: pass
     new_rid = f"rId{(max(nums) if nums else 0) + 1}"
-
-    # 3) docPr id unique
-    next_docpr = _max_existing_docpr_id(root) + 1
-
-    # 4) Rel + media path
     media_name = "media/image_legende.png"
     rel = ET.SubElement(rels, f"{{{P_REL}}}Relationship")
     rel.set("Id", new_rid)
     rel.set("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image")
     rel.set("Target", media_name)
-
-    # 5) Où insérer l'image : juste après le premier paragraphe qui contenait “Légendes”
-    paras = root.findall(".//w:p", NS)
-    idx = None
-    for i, p in enumerate(paras):
-        if "légendes" in _norm_matchable(get_text(p)):
-            idx = i
-            break
-    drawing = build_anchored_image(new_rid, width_cm, height_cm, left_cm, top_cm, "Legende", next_docpr)
-
-    if idx is not None:
-        new_run = ET.SubElement(paras[idx], f"{{{W}}}r")
-        new_run.append(drawing)
-    else:
-        p = ET.SubElement(root, f"{{{W}}}p")
-        ET.SubElement(p, f"{{{W}}}r").append(drawing)
-
+    drawing = build_anchored_image(new_rid, width_cm, height_cm, left_cm, top_cm, "Legende")
+    (ET.SubElement(paras[idx], f"{{{W}}}r") if idx is not None else ET.SubElement(ET.SubElement(root, f"{{{W}}}p"), f"{{{W}}}r")).append(drawing)
     return (
         ET.tostring(root, encoding="utf-8", xml_declaration=True),
         ET.tostring(rels, encoding="utf-8", xml_declaration=True),
@@ -696,8 +615,7 @@ def reposition_small_icon(root, left_cm=15.3, top_cm=11.0):
         if extent is None:
             continue
         try:
-            cx = int(extent.get("cx", "0"))
-            cy = int(extent.get("cy", "0"))
+            cx = int(extent.get("cx", "0")); cy = int(extent.get("cy", "0"))
         except Exception:
             continue
         if anchor.find(".//pic:pic", NS) is None:
@@ -707,8 +625,7 @@ def reposition_small_icon(root, left_cm=15.3, top_cm=11.0):
         x = anchor.findtext("wp:positionH/wp:posOffset", default="0", namespaces=NS)
         y = anchor.findtext("wp:positionV/wp:posOffset", default="0", namespaces=NS)
         try:
-            x_cm = emu_to_cm(int(x))
-            y_cm = emu_to_cm(int(y))
+            x_cm = emu_to_cm(int(x)); y_cm = emu_to_cm(int(y))
         except Exception:
             x_cm, y_cm = 0.0, 0.0
         cand.append((x_cm, y_cm, anchor))
@@ -716,15 +633,12 @@ def reposition_small_icon(root, left_cm=15.3, top_cm=11.0):
         return
     chosen = max(cand, key=lambda t: t[0])
     anchor = chosen[2]
-
     posH = anchor.find("wp:positionH", NS) or ET.SubElement(anchor, f"{{{WP}}}positionH")
-    for ch in list(posH):
-        posH.remove(ch)
+    for ch in list(posH): posH.remove(ch)
     posH.set("relativeFrom", "page")
     ET.SubElement(posH, f"{{{WP}}}posOffset").text = str(cm_to_emu(left_cm))
     posV = anchor.find("wp:positionV", NS) or ET.SubElement(anchor, f"{{{WP}}}positionV")
-    for ch in list(posV):
-        posV.remove(ch)
+    for ch in list(posV): posV.remove(ch)
     posV.set("relativeFrom", "page")
     ET.SubElement(posV, f"{{{WP}}}posOffset").text = str(cm_to_emu(top_cm))
 
@@ -737,25 +651,12 @@ def set_dml_text_size(root, pt: float):
 
 def force_footer_size_10(root):
     for r in root.findall(".//w:r", NS):
-        # laisser intacte la numérotation/les champs
         if r.find("w:fldChar", NS) is not None or r.find("w:instrText", NS) is not None:
-            continue
-        # ne pas toucher aux dessins en pied de page
-        if r.find("w:drawing", NS) is not None or r.find("w:pict", NS) is not None:
             continue
         set_run_props(r, size=10)
     set_dml_text_size(root, 10.0)
 
 # ───────────────────────── Processing DOCX ─────────────────────────
-def safe_transform(xml_bytes: bytes, fn) -> bytes:
-    """Applique fn(root) et renvoie le XML. Si erreur => renvoie tel quel."""
-    try:
-        root = ET.fromstring(xml_bytes)
-        fn(root)
-        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
-    except Exception:
-        return xml_bytes
-
 def process_bytes(
     docx_bytes: bytes,
     legend_bytes: bytes = None,
@@ -777,58 +678,53 @@ def process_bytes(
         try:
             root = ET.fromstring(data)
         except ET.ParseError:
-            # Laisse tel quel si illisible (sécurité)
             continue
 
         # traitements texte & formats
-        try:
-            replace_years(root)
-            strip_actualisation_everywhere(root)
-            force_calibri(root)
-            red_to_black(root)  # texte rouge/bleu → noir
+        replace_years(root)
+        strip_actualisation_everywhere(root)
+        force_calibri(root)
+        red_to_black(root)  # texte rouge/bleu → noir
 
-            if name == "word/document.xml":
-                cover_sizes_cleanup(root)
-                tune_cover_shapes_spatial(root)
-                tables_and_numbering(root)
-                reposition_small_icon(root, icon_left, icon_top)
-                remove_large_grey_rectangles(root, theme_colors)
-                force_red_bullets_black_in_paragraphs(root)
-                force_title_fiche_de_cours_22(root)
+        if name == "word/document.xml":
+            cover_sizes_cleanup(root)
+            tune_cover_shapes_spatial(root)
+            tables_and_numbering(root)
+            reposition_small_icon(root, icon_left, icon_top)
+            remove_large_grey_rectangles(root, theme_colors)
+            # Puces rouges -> noires au niveau des paragraphes
+            force_red_bullets_black_in_paragraphs(root)
+            # Forçage final du titre « fiche de cours » à 22 pt (paragraphe + formes)
+            force_title_fiche_de_cours_22(root)
 
-            if name == "word/numbering.xml":
-                force_red_bullets_black_in_numbering(root)
+        # Puces rouges -> noires (définitions)
+        if name == "word/numbering.xml":
+            force_red_bullets_black_in_numbering(root)
 
-            if name == "word/styles.xml":
-                force_red_bullets_black_in_styles(root)
+        # Puces rouges -> noires (styles)
+        if name == "word/styles.xml":
+            force_red_bullets_black_in_styles(root)
 
-            if name.startswith("word/footer"):
-                force_footer_size_10(root)
+        if name.startswith("word/footer"):
+            force_footer_size_10(root)
 
-            parts[name] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+        parts[name] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
-        except Exception:
-            # en cas d'alerte, on n'écrit pas la partie transformée -> on laisse l'original
-            parts[name] = data
-
-    # Légende optionnelle
+    # Légende optionnelle (inchangé)
     if legend_bytes and "word/document.xml" in parts and "word/_rels/document.xml.rels" in parts:
-        try:
-            new_doc, new_rels, media = insert_legend_image(
-                parts["word/document.xml"],
-                parts["word/_rels/document.xml.rels"],
-                legend_bytes,
-                left_cm=legend_left,
-                top_cm=legend_top,
-                width_cm=legend_w,
-                height_cm=legend_h,
-            )
-            parts["word/document.xml"] = new_doc
-            parts["word/_rels/document.xml.rels"] = new_rels
-            parts[media[0]] = media[1]
-        except Exception:
-            # si l’insertion échoue, on continue sans casser le doc
-            pass
+        parts["word/document.xml"] = remove_legend_text(parts["word/document.xml"])
+        new_doc, new_rels, media = insert_legend_image(
+            parts["word/document.xml"],
+            parts["word/_rels/document.xml.rels"],
+            legend_bytes,
+            left_cm=legend_left,
+            top_cm=legend_top,
+            width_cm=legend_w,
+            height_cm=legend_h,
+        )
+        parts["word/document.xml"] = new_doc
+        parts["word/_rels/document.xml.rels"] = new_rels
+        parts[media[0]] = media[1]
 
     out_buf = io.BytesIO()
     with zipfile.ZipFile(out_buf, "w", compression=zipfile.ZIP_DEFLATED) as zout:
