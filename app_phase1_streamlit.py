@@ -120,7 +120,7 @@ def force_calibri(root):
     for r in root.findall(".//w:r", NS):
         set_run_props(r, calibri=True)
 
-# ── Recoloration texte rouge/bleu → noir
+# ── recoloration texte rouge/bleu → noir
 def red_to_black(root):
     RED_HEX = {
         "FF0000","C00000","CC0000","E60000","ED1C24","F44336","DC143C","B22222","E74C3C","D0021B"
@@ -365,10 +365,11 @@ def tables_and_numbering(root):
             for p in tr.findall(".//w:p", NS):
                 for r in p.findall(".//w:r", NS):
                     set_run_props(r, size=9)
+    # ⚠️ CORRIGÉ : on garde le plan visible (noir, pas blanc)
     for p in root.findall(".//w:p", NS):
         if ROMAN_RE.match(get_text(p).strip() or ""):
             for r in p.findall(".//w:r", NS):
-                set_run_props(r, size=10, bold=True, italic=True, color="FFFFFF")
+                set_run_props(r, size=10, bold=True, italic=True, color="000000")
 
 # ───────────────────────── Couleurs (helpers) ──────────────────────
 def _hex_to_rgb(h: str) -> Optional[Tuple[int, int, int]]:
@@ -458,7 +459,6 @@ def extract_theme_colors(parts: Dict[str, bytes]) -> Dict[str, str]:
 # ───────────────────────── Suppression rectangle gris ──────────────
 def remove_large_grey_rectangles(root: ET.Element, theme_colors: Dict[str, str]):
     parent_map = {child: parent for parent in root.iter() for child in parent}
-    # DML
     for drawing in root.findall(".//w:drawing", NS):
         holder = drawing.find(".//wp:anchor", NS) or drawing.find(".//wp:inline", NS)
         if holder is None:
@@ -497,7 +497,6 @@ def remove_large_grey_rectangles(root: ET.Element, theme_colors: Dict[str, str])
             parent = parent_map.get(drawing)
             if parent is not None:
                 parent.remove(drawing)
-    # VML
     for pict in root.findall(".//w:pict", NS):
         for tag in ("rect", "roundrect", "shape"):
             for shape in pict.findall(f".//v:{tag}", NS):
@@ -549,7 +548,7 @@ def build_anchored_image(rId, width_cm, height_cm, left_cm, top_cm, name="Legend
     nvPicPr = ET.SubElement(pic, f"{{{PIC}}}nvPicPr")
     ET.SubElement(nvPicPr, f"{{{PIC}}}cNvPr", {"id": "0", "name": name + ".img"})
     ET.SubElement(nvPicPr, f"{{{PIC}}}cNvPicPr")
-    blipFill = ET.SubElement(pic, f"{{{PIC}}}blipFill")  # ← FIX: plus de '}' parasite
+    blipFill = ET.SubElement(pic, f"{{{PIC}}}blipFill")
     ET.SubElement(blipFill, f"{{{A}}}blip", {f"{{{R}}}embed": rId})
     stretch = ET.SubElement(blipFill, f"{{{A}}}stretch")
     ET.SubElement(stretch, f"{{{A}}}fillRect")
@@ -688,15 +687,19 @@ def process_bytes(
         if name == "word/document.xml":
             cover_sizes_cleanup(root)
             tune_cover_shapes_spatial(root)
-            tables_and_numbering(root)
+            tables_and_numbering(root)  # ⚠️ plan désormais noir
             reposition_small_icon(root, icon_left, icon_top)
             remove_large_grey_rectangles(root, theme_colors)
+            # Puces rouges -> noires au niveau des paragraphes
             force_red_bullets_black_in_paragraphs(root)
+            # Forçage final du titre « fiche de cours » à 22 pt (paragraphe + formes)
             force_title_fiche_de_cours_22(root)
 
+        # Puces rouges -> noires (définitions)
         if name == "word/numbering.xml":
             force_red_bullets_black_in_numbering(root)
 
+        # Puces rouges -> noires (styles)
         if name == "word/styles.xml":
             force_red_bullets_black_in_styles(root)
 
@@ -705,7 +708,7 @@ def process_bytes(
 
         parts[name] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
-    # Légende optionnelle
+    # Légende optionnelle (inchangé)
     if legend_bytes and "word/document.xml" in parts and "word/_rels/document.xml.rels" in parts:
         parts["word/document.xml"] = remove_legend_text(parts["word/document.xml"])
         new_doc, new_rels, media = insert_legend_image(
