@@ -4,8 +4,9 @@ import zipfile
 import re
 import os
 import unicodedata
+import hashlib
 import xml.etree.ElementTree as ET
-from typing import Dict, Tuple, List, Optional
+from typing import Dict, Tuple, List, Optional, Set
 import streamlit as st
 
 # ───────────────────────── Espaces de noms ─────────────────────────
@@ -23,7 +24,8 @@ for k, v in NS.items():
     ET.register_namespace(k, v)
 
 # ───────────────────────── Règles/constantes ───────────────────────
-TARGETS = ["2024-2025", "2024 - 2025", "2024\u00A0-\u00A02025"]
+# Remplacement d'années : on utilisera REGEX pour être robuste aux espaces
+YEAR_PAT = re.compile(r"2024[\u00A0\s]*-[\u00A0\s]*2025")
 REPL = "2025 - 2026"
 ROMAN_RE = re.compile(r"^\s*[IVXLC]+\s*[.)]?\s+.+", re.IGNORECASE)
 
@@ -83,7 +85,6 @@ def normalize_spaces(s: str) -> str:
     return s
 
 def _norm_matchable(s: str) -> str:
-    """Minuscule, sans accents, espaces normalisés, NBSP→espace."""
     s = s.replace("\u00A0", " ")
     s = unicodedata.normalize("NFKD", s)
     s = "".join(ch for ch in s if not unicodedata.combining(ch))
@@ -93,24 +94,14 @@ def _norm_matchable(s: str) -> str:
 
 # ───────────────────────── Remplacements texte ─────────────────────
 def replace_years(root):
-    for p in root.findall(".//w:p", NS):
-        wts = p.findall(".//w:t", NS)
-        if not wts:
-            continue
-        txt = "".join(t.text or "" for t in wts)
-        new = txt
-        for tgt in TARGETS:
-            new = new.replace(tgt, REPL)
-        if new != txt:
-            redistribute(wts, new)
-    ats = root.findall(".//a:txBody//a:t", NS)
-    if ats:
-        txt = "".join(t.text or "" for t in ats)
-        new = txt
-        for tgt in TARGETS:
-            new = new.replace(tgt, REPL)
-        if new != txt:
-            redistribute(ats, new)
+    # Tous les w:t
+    for t in root.findall(".//w:t", NS):
+        if t.text:
+            t.text = YEAR_PAT.sub(REPL, t.text)
+    # Tous les a:t (texte dans shapes DML)
+    for t in root.findall(".//a:t", NS):
+        if t.text:
+            t.text = YEAR_PAT.sub(REPL, t.text)
 
 def strip_actualisation_everywhere(root):
     for t in root.findall(".//w:t", NS) + root.findall(".//a:t", NS):
@@ -122,6 +113,12 @@ def force_calibri(root):
         set_run_props(r, calibri=True)
 
 # ── recoloration texte rouge/bleu → noir
+def _hex_to_rgb(h: str) -> Optional[Tuple[int, int, int]]:
+    h = (h or "").strip().lstrip("#").upper()
+    if len(h) != 6 or not re.fullmatch(r"[0-9A-F]{6}", h):
+        return None
+    return int(h[0:2],16), int(h[2:4],16), int(h[4:6],16)
+
 def red_to_black(root):
     RED_HEX = {
         "FF0000","C00000","CC0000","E60000","ED1C24","F44336","DC143C","B22222","E74C3C","D0021B"
@@ -130,11 +127,9 @@ def red_to_black(root):
         "0000FF","0070C0","2E74B5","1F497D","2F5496","4F81BD","5B9BD5","1F4E79","0F4C81","1E90FF","3399FF","3C78D8"
     }
     def looks_red(rgb: Tuple[int,int,int]) -> bool:
-        r,g,b = rgb
-        return (r >= 170 and g <= 110 and b <= 110)
+        r,g,b = rgb; return (r >= 170 and g <= 110 and b <= 110)
     def looks_blue(rgb: Tuple[int,int,int]) -> bool:
-        r,g,b = rgb
-        return (b >= 170 and r <= 110 and g <= 140)
+        r,g,b = rgb; return (b >= 170 and r <= 110 and g <= 140)
 
     for run in root.findall(".//w:r", NS):
         rPr = run.find("w:rPr", NS)
@@ -165,8 +160,7 @@ def force_red_bullets_black_in_numbering(root):
     RED_HEX = {"FF0000","C00000","CC0000","E60000","ED1C24","F44336","DC143C","B22222","E74C3C","D0021B"}
     def looks_red(rgb: Tuple[int,int,int]) -> bool:
         if not rgb: return False
-        r,g,b = rgb
-        return (r >= 170 and g <= 110 and b <= 110)
+        r,g,b = rgb; return (r >= 170 and g <= 110 and b <= 110)
     for col in root.findall(".//w:lvl//w:rPr/w:color", NS):
         val = (col.get(f"{{{W}}}val") or "").strip().upper()
         make_black = False
@@ -188,8 +182,7 @@ def force_red_bullets_black_in_styles(root):
     RED_HEX = {"FF0000","C00000","CC0000","E60000","ED1C24","F44336","DC143C","B22222","E74C3C","D0021B"}
     def looks_red(rgb: Tuple[int,int,int]) -> bool:
         if not rgb: return False
-        r,g,b = rgb
-        return (r >= 170 and g <= 110 and b <= 110)
+        r,g,b = rgb; return (r >= 170 and g <= 110 and b <= 110)
     for st in root.findall(".//w:style[@w:type='paragraph']", NS):
         name_el = st.find("w:name", NS)
         style_id = (st.get(f"{{{W}}}styleId") or "").lower()
@@ -219,9 +212,7 @@ def force_red_bullets_black_in_paragraphs(root):
     RED_HEX = {"FF0000","C00000","CC0000","E60000","ED1C24","F44336","DC143C","B22222","E74C3C","D0021B"}
     def looks_red(rgb: Tuple[int,int,int]) -> bool:
         if not rgb: return False
-        r,g,b = rgb
-        return (r >= 170 and g <= 110 and b <= 110)
-
+        r,g,b = rgb; return (r >= 170 and g <= 110 and b <= 110)
     for p in root.findall(".//w:p", NS):
         pPr = p.find("w:pPr", NS)
         if pPr is None or pPr.find("w:numPr", NS) is None:
@@ -295,9 +286,7 @@ def cover_sizes_cleanup(root):
         if last_was_fiche and txt:
             set_size(paras[i], 20)
             last_was_fiche = False
-        if "université" in low and any(
-            x.replace("\u00A0", " ") in txt.replace("\u00A0", " ") for x in TARGETS + [REPL]
-        ):
+        if "université" in low and YEAR_PAT.search(txt.replace("\u00A0"," ")):
             set_size(paras[i], 10)
 
 # ───────────────────────── Couverture : formes DML/WPS (spatial) ──
@@ -314,9 +303,7 @@ def tune_cover_shapes_spatial(root):
     holders.sort(key=lambda t: (t[0], t[1]))
     for _, _, h, txt in holders:
         low = txt.lower()
-        if ("universite" in low or "université" in low) and any(
-            t.replace("\u00A0", " ") in txt.replace("\u00A0", " ") for t in TARGETS + [REPL]
-        ):
+        if ("universite" in low or "université" in low) and YEAR_PAT.search(txt.replace("\u00A0"," ")):
             set_tx_size(h, 10.0)
     idx_fiche = None
     for i, (_, _, h, txt) in enumerate(holders):
@@ -344,12 +331,10 @@ def tune_cover_shapes_spatial(root):
 
 # ───────────────────────── Forçage titre « fiche de cours » à 22 pt ─
 def force_title_fiche_de_cours_22(root):
-    # Paragraphe w:p
     for p in root.findall(".//w:p", NS):
         if "fiche de cours" in _norm_matchable(get_text(p)):
             for r in p.findall(".//w:r", NS):
                 set_run_props(r, size=22)
-    # Formes (DrawingML / WPS)
     for holder in root.findall(".//wp:anchor", NS) + root.findall(".//wp:inline", NS):
         txt = get_tx_text(holder)
         if txt and "fiche de cours" in _norm_matchable(txt):
@@ -374,12 +359,6 @@ def tables_and_numbering(root):
                 set_run_props(r, size=10, bold=True, italic=True, color="FFFFFF")
 
 # ───────────────────────── Couleurs (helpers) ──────────────────────
-def _hex_to_rgb(h: str) -> Optional[Tuple[int, int, int]]:
-    h = (h or "").strip().lstrip("#").upper()
-    if len(h) != 6 or not re.fullmatch(r"[0-9A-F]{6}", h):
-        return None
-    return int(h[0:2],16), int(h[2:4],16), int(h[4:6],16)
-
 def _pct(val: Optional[str]) -> float:
     try:
         return max(0.0, min(1.0, int(val)/100000.0))
@@ -526,13 +505,9 @@ def build_anchored_image(rId, width_cm, height_cm, left_cm, top_cm, name="Legend
     xoff, yoff = cm_to_emu(left_cm), cm_to_emu(top_cm)
     drawing = ET.Element(f"{{{W}}}drawing")
     anchor = ET.SubElement(
-        drawing,
-        f"{{{WP}}}anchor",
-        {
-            "distT": "0","distB": "0","distL": "0","distR": "0",
-            "simplePos": "0","relativeHeight": "0","behindDoc": "0",
-            "locked": "0","layoutInCell": "1","allowOverlap": "1",
-        },
+        drawing, f"{{{WP}}}anchor",
+        {"distT":"0","distB":"0","distL":"0","distR":"0","simplePos":"0","relativeHeight":"0",
+         "behindDoc":"0","locked":"0","layoutInCell":"1","allowOverlap":"1"}
     )
     ET.SubElement(anchor, f"{{{WP}}}simplePos", {"x": "0", "y": "0"})
     posH = ET.SubElement(anchor, f"{{{WP}}}positionH", {"relativeFrom": "page"})
@@ -568,7 +543,12 @@ def remove_legend_text(document_xml: bytes) -> bytes:
         if get_text(p).strip().lower() == "légendes":
             for t in p.findall(".//w:t", NS):
                 t.text = ""
-    lines = {"Notion nouvelle cette année","Notion hors programme","Notion déjà tombée au concours","Astuces et méthodes"}
+    lines = {
+        "Notion nouvelle cette année",
+        "Notion hors programme",
+        "Notion déjà tombée au concours",
+        "Astuces et méthodes",
+    }
     for p in root.findall(".//w:p", NS):
         if get_text(p).strip() in lines:
             for t in p.findall(".//w:t", NS):
@@ -656,6 +636,94 @@ def force_footer_size_10(root):
         set_run_props(r, size=10)
     set_dml_text_size(root, 10.0)
 
+# ───────────────────────── Suppression mégaphones (NOUVEAU) ────────
+def _sha1(b: bytes) -> str:
+    return hashlib.sha1(b).hexdigest()
+
+def _rels_name_for(part_name: str) -> str:
+    d = os.path.dirname(part_name)
+    b = os.path.basename(part_name)
+    return os.path.join(d, "_rels", b + ".rels")
+
+def _resolve_target_path(base_part: str, target: str) -> str:
+    base_dir = os.path.dirname(base_part)
+    norm = os.path.normpath(os.path.join(base_dir, target))
+    return norm.replace("\\", "/")
+
+def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET.Element,
+                               megaphone_hashes: Set[str], tiny_cm=1.3, max_kb=30) -> None:
+    rels_name = _rels_name_for(part_name)
+    if rels_name not in parts:
+        return
+    try:
+        rels_root = ET.fromstring(parts[rels_name])
+    except ET.ParseError:
+        return
+
+    # Map rId -> full media path
+    rmap: Dict[str, str] = {}
+    for rel in rels_root.findall(f".//{{{P_REL}}}Relationship"):
+        rid = rel.get("Id") or ""
+        tgt = rel.get("Target") or ""
+        rmap[rid] = _resolve_target_path(part_name, tgt)
+
+    # parent map to remove <w:drawing>
+    parent_map = {child: parent for parent in root.iter() for child in parent}
+    removed_rids: Set[str] = set()
+
+    # Iterate all pictures
+    for blip in root.findall(".//a:blip", NS):
+        rid = blip.get(f"{{{R}}}embed")
+        if not rid or rid not in rmap:
+            continue
+        media_path = rmap[rid]
+        if media_path not in parts:
+            continue
+        data = parts[media_path]
+        match_hash = _sha1(data) in megaphone_hashes if megaphone_hashes else False
+
+        # Find enclosing holder + drawing to check size & remove safely
+        holder = None
+        node = blip
+        while node is not None:
+            if node.tag in (f"{{{WP}}}anchor", f"{{{WP}}}inline"):
+                holder = node; break
+            node = parent_map.get(node)
+        drawing = None
+        node2 = blip
+        while node2 is not None:
+            if node2.tag == f"{{{W}}}drawing":
+                drawing = node2; break
+            node2 = parent_map.get(node2)
+
+        # Heuristic on very small icon size and file size
+        is_tiny = False
+        if holder is not None:
+            extent = holder.find("wp:extent", NS)
+            if extent is not None:
+                try:
+                    cx = int(extent.get("cx", "0")); cy = int(extent.get("cy", "0"))
+                    wcm = emu_to_cm(cx); hcm = emu_to_cm(cy)
+                    is_tiny = (wcm <= tiny_cm and hcm <= tiny_cm)
+                except Exception:
+                    is_tiny = False
+        is_light = (len(data) <= max_kb * 1024)
+
+        should_remove = match_hash or (is_tiny and is_light)
+
+        if should_remove and drawing is not None:
+            parent = parent_map.get(drawing)
+            if parent is not None:
+                parent.remove(drawing)
+                removed_rids.add(rid)
+
+    # Remove Relationships for deleted drawings (leave media bytes intact = safe)
+    if removed_rids:
+        for rel in list(rels_root.findall(f".//{{{P_REL}}}Relationship")):
+            if (rel.get("Id") or "") in removed_rids:
+                rels_root.remove(rel)
+        parts[rels_name] = ET.tostring(rels_root, encoding="utf-8", xml_declaration=True)
+
 # ───────────────────────── Processing DOCX ─────────────────────────
 def process_bytes(
     docx_bytes: bytes,
@@ -666,12 +734,24 @@ def process_bytes(
     legend_top=23.8,
     legend_w=5.68,
     legend_h=3.77,
+    megaphone_samples: Optional[List[bytes]] = None,
 ) -> bytes:
 
     with zipfile.ZipFile(io.BytesIO(docx_bytes), "r") as zin:
         parts: Dict[str, bytes] = {n: zin.read(n) for n in zin.namelist()}
+
     theme_colors = extract_theme_colors(parts)
 
+    # Prépare les hashes des exemples d'icônes mégaphone (optionnels)
+    megaphone_hashes: Set[str] = set()
+    if megaphone_samples:
+        for b in megaphone_samples:
+            try:
+                megaphone_hashes.add(_sha1(b))
+            except Exception:
+                pass
+
+    # Traite chaque XML
     for name, data in list(parts.items()):
         if not name.endswith(".xml"):
             continue
@@ -680,8 +760,8 @@ def process_bytes(
         except ET.ParseError:
             continue
 
-        # traitements texte & formats
-        replace_years(root)
+        # TEXTE & FORMATS
+        replace_years(root)  # <- couvre aussi les pieds de page
         strip_actualisation_everywhere(root)
         force_calibri(root)
         red_to_black(root)  # texte rouge/bleu → noir
@@ -692,21 +772,20 @@ def process_bytes(
             tables_and_numbering(root)
             reposition_small_icon(root, icon_left, icon_top)
             remove_large_grey_rectangles(root, theme_colors)
-            # Puces rouges -> noires au niveau des paragraphes
             force_red_bullets_black_in_paragraphs(root)
-            # Forçage final du titre « fiche de cours » à 22 pt (paragraphe + formes)
             force_title_fiche_de_cours_22(root)
 
-        # Puces rouges -> noires (définitions)
         if name == "word/numbering.xml":
             force_red_bullets_black_in_numbering(root)
 
-        # Puces rouges -> noires (styles)
         if name == "word/styles.xml":
             force_red_bullets_black_in_styles(root)
 
         if name.startswith("word/footer"):
             force_footer_size_10(root)
+
+        # NOUVEAU : purge des petites icônes mégaphone (par part)
+        _remove_megaphones_in_part(parts, name, root, megaphone_hashes)
 
         parts[name] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
@@ -745,7 +824,7 @@ def cleaned_filename(original_name: str) -> str:
 # ───────────────────────── Interface Streamlit ─────────────────────
 st.set_page_config(page_title="Fiches Diploma", page_icon="🧠", layout="centered")
 st.title("🧠 Fiches Diploma")
-st.caption("Transforme tes .docx des fiches actualisées de 2024-2025 en fiches de cours non actualisées de 2025-2026 en respectant toutes les règles")
+st.caption("Transforme tes .docx 2024-2025 en 2025-2026 (couleurs, puces, tailles, rectangle gris, légende, etc.) + suppression mégaphones, années en pied de page mises à jour.")
 
 with st.sidebar:
     st.subheader("Paramètres (cm)")
@@ -760,12 +839,15 @@ st.markdown("**1) Glisse/dépose un ou plusieurs fichiers .docx**")
 files = st.file_uploader("DOCX à traiter", type=["docx"], accept_multiple_files=True)
 st.markdown("**2) (Optionnel) Ajoute l’image de la Légende (PNG/JPG)**")
 legend_file = st.file_uploader("Image Légendes", type=["png","jpg","jpeg","webp"], accept_multiple_files=False)
+st.markdown("**3) (Optionnel) Fourni 1–2 exemples d’icône mégaphone (PNG/JPG) pour détection par empreinte**")
+megaphone_files = st.file_uploader("Icônes mégaphone (exemples)", type=["png","jpg","jpeg","webp"], accept_multiple_files=True)
 
 if st.button("⚙️ Lancer le traitement", type="primary", disabled=not files):
     if not files:
         st.warning("Ajoute au moins un fichier .docx")
     else:
         legend_bytes = legend_file.read() if legend_file else None
+        megaphone_samples = [f.read() for f in megaphone_files] if megaphone_files else None
         for up in files:
             try:
                 out_bytes = process_bytes(
@@ -777,6 +859,7 @@ if st.button("⚙️ Lancer le traitement", type="primary", disabled=not files):
                     legend_top=legend_top,
                     legend_w=legend_w,
                     legend_h=legend_h,
+                    megaphone_samples=megaphone_samples,
                 )
                 out_name = cleaned_filename(up.name)
                 st.success(f"✅ Terminé : {up.name}")
