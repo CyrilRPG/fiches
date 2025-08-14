@@ -27,6 +27,10 @@ TARGETS = ["2024-2025", "2024 - 2025", "2024\u00A0-\u00A02025"]
 REPL = "2025 - 2026"
 ROMAN_RE = re.compile(r"^\s*[IVXLC]+\s*[.)]?\s+.+", re.IGNORECASE)
 
+# Couleurs "larges" Word (rouges/bleus) → noir
+RED_HEX  = {"FF0000","C00000","CC0000","E60000","ED1C24","F44336","DC143C","B22222","E74C3C","D0021B"}
+BLUE_HEX = {"0000FF","0070C0","2E74B5","1F497D","2F5496","4F81BD","5B9BD5","1F4E79","0F4C81","1E90FF","3399FF","3C78D8"}
+
 # ───────────────────────── Utils ───────────────────────────────────
 def cm_to_emu(cm: float) -> int:
     return int(round(cm * 360000))
@@ -102,6 +106,7 @@ def replace_years(root):
             new = new.replace(tgt, REPL)
         if new != txt:
             redistribute(wts, new)
+    # Formes (DrawingML)
     ats = root.findall(".//a:txBody//a:t", NS)
     if ats:
         txt = "".join(t.text or "" for t in ats)
@@ -121,20 +126,23 @@ def force_calibri(root):
         set_run_props(r, calibri=True)
 
 # ── recoloration texte rouge/bleu → noir
-def red_to_black(root):
-    RED_HEX = {
-        "FF0000","C00000","CC0000","E60000","ED1C24","F44336","DC143C","B22222","E74C3C","D0021B"
-    }
-    BLUE_HEX = {
-        "0000FF","0070C0","2E74B5","1F497D","2F5496","4F81BD","5B9BD5","1F4E79","0F4C81","1E90FF","3399FF","3C78D8"
-    }
-    def looks_red(rgb: Tuple[int,int,int]) -> bool:
-        r,g,b = rgb
-        return (r >= 170 and g <= 110 and b <= 110)
-    def looks_blue(rgb: Tuple[int,int,int]) -> bool:
-        r,g,b = rgb
-        return (b >= 170 and r <= 110 and g <= 140)
+def _hex_to_rgb(h: str) -> Optional[Tuple[int, int, int]]:
+    h = (h or "").strip().lstrip("#").upper()
+    if len(h) != 6 or not re.fullmatch(r"[0-9A-F]{6}", h):
+        return None
+    return int(h[0:2],16), int(h[2:4],16), int(h[4:6],16)
 
+def _looks_red(rgb: Tuple[int,int,int]) -> bool:
+    if not rgb: return False
+    r,g,b = rgb
+    return (r >= 170 and g <= 110 and b <= 110)
+
+def _looks_blue(rgb: Tuple[int,int,int]) -> bool:
+    if not rgb: return False
+    r,g,b = rgb
+    return (b >= 170 and r <= 110 and g <= 140)
+
+def redblue_to_black_on_runs(root):
     for run in root.findall(".//w:r", NS):
         rPr = run.find("w:rPr", NS)
         if rPr is None:
@@ -152,75 +160,57 @@ def red_to_black(root):
                 make_black = True
             else:
                 rgb = _hex_to_rgb(val)
-                if rgb and (looks_red(rgb) or looks_blue(rgb)):
+                if rgb and (_looks_red(rgb) or _looks_blue(rgb)):
                     make_black = True
         if make_black:
             c.set(f"{{{W}}}val", "000000")
             for a in ("themeColor", "themeTint", "themeShade"):
                 c.attrib.pop(f"{{{W}}}{a}", None)
 
-# ── 1) Puces rouges → noires : numbering.xml
-def force_red_bullets_black_in_numbering(root):
-    RED_HEX = {"FF0000","C00000","CC0000","E60000","ED1C24","F44336","DC143C","B22222","E74C3C","D0021B"}
-    def looks_red(rgb: Tuple[int,int,int]) -> bool:
-        if not rgb: return False
-        r,g,b = rgb
-        return (r >= 170 and g <= 110 and b <= 110)
-    for col in root.findall(".//w:lvl//w:rPr/w:color", NS):
-        val = (col.get(f"{{{W}}}val") or "").strip().upper()
-        make_black = False
-        if re.fullmatch(r"[0-9A-F]{6}", val or ""):
-            if val in RED_HEX:
+# ── Puces rouges/bleues → noires
+def _color_to_black_if_rb(col_el: ET.Element):
+    val = (col_el.get(f"{{{W}}}val") or "").strip().upper()
+    make_black = False
+    if re.fullmatch(r"[0-9A-F]{6}", val or ""):
+        if val in RED_HEX or val in BLUE_HEX:
+            make_black = True
+        else:
+            rgb = _hex_to_rgb(val)
+            if rgb and (_looks_red(rgb) or _looks_blue(rgb)):
                 make_black = True
-            else:
-                rgb = _hex_to_rgb(val)
-                if rgb and looks_red(rgb):
-                    make_black = True
-        if make_black:
-            col.set(f"{{{W}}}val", "000000")
-            for a in ("themeColor","themeTint","themeShade"):
-                col.attrib.pop(f"{{{W}}}{a}", None)
+    if make_black:
+        col_el.set(f"{{{W}}}val", "000000")
+        for a in ("themeColor","themeTint","themeShade"):
+            col_el.attrib.pop(f"{{{W}}}{a}", None)
 
-# ── 2) Puces rouges → noires : styles de liste (styles.xml)
-def force_red_bullets_black_in_styles(root):
-    CANDIDATES = {"list","bullet","puce","puces","liste"}
-    RED_HEX = {"FF0000","C00000","CC0000","E60000","ED1C24","F44336","DC143C","B22222","E74C3C","D0021B"}
-    def looks_red(rgb: Tuple[int,int,int]) -> bool:
-        if not rgb: return False
-        r,g,b = rgb
-        return (r >= 170 and g <= 110 and b <= 110)
-    for st in root.findall(".//w:style[@w:type='paragraph']", NS):
+def force_rb_bullets_black_in_numbering(root):
+    for lvl in root.findall(".//w:lvl", NS):
+        rpr = lvl.find("w:rPr", NS)
+        if rpr is None:
+            continue
+        col = rpr.find("w:color", NS)
+        if col is not None:
+            _color_to_black_if_rb(col)
+
+def force_rb_bullets_black_in_styles(root):
+    # Pas de XPath avec prédicat namespacé : on filtre en Python
+    for st in root.findall(".//w:style", NS):
+        if (st.get(f"{{{W}}}type") or "") != "paragraph":
+            continue
         name_el = st.find("w:name", NS)
         style_id = (st.get(f"{{{W}}}styleId") or "").lower()
         style_name = (name_el.get(f"{{{W}}}val") if name_el is not None else "").lower()
         tag = (style_id + " " + style_name)
-        if not any(tok in tag for tok in CANDIDATES):
+        if not any(tok in tag for tok in ("list","bullet","puce","puces","liste")):
             continue
-        col = st.find(".//w:rPr/w:color", NS)
-        if col is None:
+        rpr = st.find(".//w:rPr", NS)
+        if rpr is None:
             continue
-        val = (col.get(f"{{{W}}}val") or "").strip().upper()
-        make_black = False
-        if re.fullmatch(r"[0-9A-F]{6}", val or ""):
-            if val in RED_HEX:
-                make_black = True
-            else:
-                rgb = _hex_to_rgb(val)
-                if rgb and looks_red(rgb):
-                    make_black = True
-        if make_black:
-            col.set(f"{{{W}}}val", "000000")
-            for a in ("themeColor","themeTint","themeShade"):
-                col.attrib.pop(f"{{{W}}}{a}", None)
+        col = rpr.find("w:color", NS)
+        if col is not None:
+            _color_to_black_if_rb(col)
 
-# ── 3) Puces rouges → noires : au niveau des paragraphes numérotés
-def force_red_bullets_black_in_paragraphs(root):
-    RED_HEX = {"FF0000","C00000","CC0000","E60000","ED1C24","F44336","DC143C","B22222","E74C3C","D0021B"}
-    def looks_red(rgb: Tuple[int,int,int]) -> bool:
-        if not rgb: return False
-        r,g,b = rgb
-        return (r >= 170 and g <= 110 and b <= 110)
-
+def force_rb_bullets_black_in_paragraphs(root):
     for p in root.findall(".//w:p", NS):
         pPr = p.find("w:pPr", NS)
         if pPr is None or pPr.find("w:numPr", NS) is None:
@@ -229,21 +219,8 @@ def force_red_bullets_black_in_paragraphs(root):
         if rPr is None:
             continue
         col = rPr.find("w:color", NS)
-        if col is None:
-            continue
-        val = (col.get(f"{{{W}}}val") or "").strip().upper()
-        make_black = False
-        if re.fullmatch(r"[0-9A-F]{6}", val or ""):
-            if val in RED_HEX:
-                make_black = True
-            else:
-                rgb = _hex_to_rgb(val)
-                if rgb and looks_red(rgb):
-                    make_black = True
-        if make_black:
-            col.set(f"{{{W}}}val", "000000")
-            for a in ("themeColor","themeTint","themeShade"):
-                col.attrib.pop(f"{{{W}}}{a}", None)
+        if col is not None:
+            _color_to_black_if_rb(col)
 
 # ───────────────────────── Helpers couvertures (formes) ────────────
 def holder_pos_cm(holder) -> Tuple[float, float]:
@@ -276,17 +253,21 @@ def set_tx_size(holder, pt: float):
 def cover_sizes_cleanup(root):
     paras = root.findall(".//w:p", NS)
     texts = [get_text(p).strip() for p in paras]
+
     def set_size(p, pt):
         for r in p.findall(".//w:r", NS):
             set_run_props(r, size=pt)
+
     last_was_fiche = False
     for i, txt in enumerate(texts):
         low = txt.lower()
+
         if txt.strip().upper() in ("ACTUALISATION", "NOUVELLE FICHE"):
             for t in paras[i].findall(".//w:t", NS):
                 if t.text:
                     t.text = re.sub(r"(?iu)\b(actualisation|nouvelle\s+fiche)\b", "", t.text)
             continue
+
         if "fiche de cours" in low:
             set_size(paras[i], 22)
             last_was_fiche = True
@@ -294,6 +275,7 @@ def cover_sizes_cleanup(root):
         if last_was_fiche and txt:
             set_size(paras[i], 20)
             last_was_fiche = False
+
         if "université" in low and any(
             x.replace("\u00A0", " ") in txt.replace("\u00A0", " ") for x in TARGETS + [REPL]
         ):
@@ -311,24 +293,28 @@ def tune_cover_shapes_spatial(root):
     if not holders:
         return
     holders.sort(key=lambda t: (t[0], t[1]))
+
     for _, _, h, txt in holders:
         low = txt.lower()
         if ("universite" in low or "université" in low) and any(
             t.replace("\u00A0", " ") in txt.replace("\u00A0", " ") for t in TARGETS + [REPL]
         ):
             set_tx_size(h, 10.0)
+
     idx_fiche = None
     for i, (_, _, h, txt) in enumerate(holders):
-        if "fiche de cours" in txt.lower():
+        if "fiche de cours" in _norm_matchable(txt):
             set_tx_size(h, 22.0)
             idx_fiche = i
             break
     if idx_fiche is not None:
         for j in range(idx_fiche + 1, len(holders)):
             txt_next = holders[j][3].strip()
-            if txt_next and "fiche de cours" not in txt_next.lower():
+            if txt_next and "fiche de cours" not in _norm_matchable(txt_next):
                 set_tx_size(holders[j][2], 20.0)
                 break
+
+    # nettoyage des mentions dans les formes
     for _, _, h, _ in holders:
         tx = h.find(".//a:txBody", NS)
         if tx is not None:
@@ -341,7 +327,7 @@ def tune_cover_shapes_spatial(root):
                 if t.text:
                     t.text = re.sub(r"(?iu)\b(actualisation|nouvelle\s+fiche)\b", "", t.text)
 
-# ───────────────────────── Forçage titre « fiche de cours » à 22 pt ─
+# ───────────────────────── Forçage titre « fiche de cours » ────────
 def force_title_fiche_de_cours_22(root):
     for p in root.findall(".//w:p", NS):
         if "fiche de cours" in _norm_matchable(get_text(p)):
@@ -365,19 +351,12 @@ def tables_and_numbering(root):
             for p in tr.findall(".//w:p", NS):
                 for r in p.findall(".//w:r", NS):
                     set_run_props(r, size=9)
-    # ⚠️ CORRIGÉ : on garde le plan visible (noir, pas blanc)
     for p in root.findall(".//w:p", NS):
         if ROMAN_RE.match(get_text(p).strip() or ""):
             for r in p.findall(".//w:r", NS):
-                set_run_props(r, size=10, bold=True, italic=True, color="000000")
+                set_run_props(r, size=10, bold=True, italic=True, color="FFFFFF")
 
 # ───────────────────────── Couleurs (helpers) ──────────────────────
-def _hex_to_rgb(h: str) -> Optional[Tuple[int, int, int]]:
-    h = (h or "").strip().lstrip("#").upper()
-    if len(h) != 6 or not re.fullmatch(r"[0-9A-F]{6}", h):
-        return None
-    return int(h[0:2],16), int(h[2:4],16), int(h[4:6],16)
-
 def _pct(val: Optional[str]) -> float:
     try:
         return max(0.0, min(1.0, int(val)/100000.0))
@@ -429,8 +408,7 @@ def _resolve_solid_fill_color(spPr: ET.Element, theme_colors: Dict[str,str]) -> 
     return None
 
 def _shape_has_text(holder: ET.Element) -> bool:
-    txt = get_tx_text(holder)
-    return bool(txt.strip())
+    return bool(get_tx_text(holder).strip())
 
 # ───────────────────────── Thème ───────────────────────────────────
 def extract_theme_colors(parts: Dict[str, bytes]) -> Dict[str, str]:
@@ -458,16 +436,28 @@ def extract_theme_colors(parts: Dict[str, bytes]) -> Dict[str, str]:
 
 # ───────────────────────── Suppression rectangle gris ──────────────
 def remove_large_grey_rectangles(root: ET.Element, theme_colors: Dict[str, str]):
+    """
+    Supprime uniquement un grand rectangle gris clair (≈#F2F2F2) à droite de la couverture,
+    SANS texte ni groupage — heuristique conservatrice.
+    """
     parent_map = {child: parent for parent in root.iter() for child in parent}
+
+    # DML
     for drawing in root.findall(".//w:drawing", NS):
         holder = drawing.find(".//wp:anchor", NS) or drawing.find(".//wp:inline", NS)
         if holder is None:
             continue
+        # pas d'image
         if holder.find(".//pic:pic", NS) is not None:
             continue
+        # pas de texte (y compris textbox WPS)
+        if _shape_has_text(holder) or holder.find(".//wps:txbx", NS) is not None:
+            continue
+        # géométrie rect/roundRect
         prst = holder.find(".//a:prstGeom", NS)
         if prst is None or prst.get("prst") not in ("rect", "roundRect"):
             continue
+        # taille/position
         extent = holder.find("wp:extent", NS)
         if extent is None:
             continue
@@ -481,25 +471,35 @@ def remove_large_grey_rectangles(root: ET.Element, theme_colors: Dict[str, str])
             x_cm = emu_to_cm(int(x_el.text)) if x_el is not None else 0.0
         except Exception:
             x_cm = 0.0
-        if _shape_has_text(holder):
-            continue
+
         spPr = holder.find(".//a:spPr", NS) or holder.find(".//wps:spPr", NS)
         if spPr is None:
             for el in holder.iter():
                 if el.tag.endswith("spPr"):
                     spPr = el; break
+
         rgb = _resolve_solid_fill_color(spPr, theme_colors)
         looks_gray = rgb is not None and \
-                     abs(rgb[0]-0xF2) <= 12 and abs(rgb[1]-0xF2) <= 12 and abs(rgb[2]-0xF2) <= 12
+            abs(rgb[0]-0xF2) <= 12 and abs(rgb[1]-0xF2) <= 12 and abs(rgb[2]-0xF2) <= 12
+
         on_right   = x_cm >= 9.0
         big_enough = (width_cm >= 7.0 and height_cm >= 12.0)
-        if looks_gray and on_right and big_enough:
+
+        # Exigence supplémentaire : si l’ancre a behindDoc="1", on accepte ; sinon on garde (encore plus sûr)
+        behind = (holder.get("behindDoc") == "1")
+
+        if looks_gray and on_right and big_enough and behind:
             parent = parent_map.get(drawing)
             if parent is not None:
                 parent.remove(drawing)
+
+    # VML
     for pict in root.findall(".//w:pict", NS):
         for tag in ("rect", "roundrect", "shape"):
             for shape in pict.findall(f".//v:{tag}", NS):
+                # pas de textbox
+                if shape.find(".//w:txbxContent", NS) is not None:
+                    continue
                 style = (shape.get("style") or "")
                 m_w = re.search(r"width:([0-9.]+)cm", style)
                 m_h = re.search(r"height:([0-9.]+)cm", style)
@@ -511,9 +511,8 @@ def remove_large_grey_rectangles(root: ET.Element, theme_colors: Dict[str, str])
                 fill_attr = (shape.get("fillcolor") or "").lstrip("#")
                 rgb = _hex_to_rgb(fill_attr.upper())
                 looks_gray = rgb is not None and \
-                             abs(rgb[0]-0xF2) <= 12 and abs(rgb[1]-0xF2) <= 12 and abs(rgb[2]-0xF2) <= 12
-                has_txbx = shape.find(".//w:txbxContent", NS) is not None
-                if looks_gray and not has_txbx and left_cm >= 9.0 and w >= 7.0 and h >= 12.0:
+                    abs(rgb[0]-0xF2) <= 12 and abs(rgb[1]-0xF2) <= 12 and abs(rgb[2]-0xF2) <= 12
+                if looks_gray and left_cm >= 9.0 and w >= 7.0 and h >= 12.0:
                     parent = parent_map.get(pict)
                     if parent is not None:
                         parent.remove(pict)
@@ -566,7 +565,12 @@ def remove_legend_text(document_xml: bytes) -> bytes:
         if get_text(p).strip().lower() == "légendes":
             for t in p.findall(".//w:t", NS):
                 t.text = ""
-    lines = {"Notion nouvelle cette année","Notion hors programme","Notion déjà tombée au concours","Astuces et méthodes"}
+    lines = {
+        "Notion nouvelle cette année",
+        "Notion hors programme",
+        "Notion déjà tombée au concours",
+        "Astuces et méthodes",
+    }
     for p in root.findall(".//w:p", NS):
         if get_text(p).strip() in lines:
             for t in p.findall(".//w:t", NS):
@@ -574,8 +578,13 @@ def remove_legend_text(document_xml: bytes) -> bytes:
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 def insert_legend_image(
-    document_xml: bytes, rels_xml: bytes, image_bytes: bytes,
-    left_cm=2.3, top_cm=23.8, width_cm=5.68, height_cm=3.77,
+    document_xml: bytes,
+    rels_xml: bytes,
+    image_bytes: bytes,
+    left_cm=2.3,
+    top_cm=23.8,
+    width_cm=5.68,
+    height_cm=3.77,
 ) -> Tuple[bytes, bytes, Tuple[str, bytes]]:
     root = ET.fromstring(document_xml)
     rels = ET.fromstring(rels_xml)
@@ -583,22 +592,29 @@ def insert_legend_image(
     idx = None
     for i, p in enumerate(paras):
         if get_text(p).strip().lower().startswith("légendes"):
-            idx = i; break
-    if idx is None and paras: idx = 0
+            idx = i
+            break
+    if idx is None and paras:
+        idx = 0
+
     nums = []
     for rel in rels.findall(f".//{{{P_REL}}}Relationship"):
         rid = rel.get("Id", "")
         if rid.startswith("rId"):
-            try: nums.append(int(rid[3:]))
-            except Exception: pass
+            try:
+                nums.append(int(rid[3:]))
+            except Exception:
+                pass
     new_rid = f"rId{(max(nums) if nums else 0) + 1}"
     media_name = "media/image_legende.png"
     rel = ET.SubElement(rels, f"{{{P_REL}}}Relationship")
     rel.set("Id", new_rid)
     rel.set("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image")
     rel.set("Target", media_name)
+
     drawing = build_anchored_image(new_rid, width_cm, height_cm, left_cm, top_cm, "Legende")
     (ET.SubElement(paras[idx], f"{{{W}}}r") if idx is not None else ET.SubElement(ET.SubElement(root, f"{{{W}}}p"), f"{{{W}}}r")).append(drawing)
+
     return (
         ET.tostring(root, encoding="utf-8", xml_declaration=True),
         ET.tostring(rels, encoding="utf-8", xml_declaration=True),
@@ -649,9 +665,11 @@ def set_dml_text_size(root, pt: float):
 
 def force_footer_size_10(root):
     for r in root.findall(".//w:r", NS):
+        # on ne touche pas aux champs
         if r.find("w:fldChar", NS) is not None or r.find("w:instrText", NS) is not None:
             continue
         set_run_props(r, size=10)
+    # Si présence de DML dans le footer
     set_dml_text_size(root, 10.0)
 
 # ───────────────────────── Processing DOCX ─────────────────────────
@@ -668,66 +686,87 @@ def process_bytes(
 
     with zipfile.ZipFile(io.BytesIO(docx_bytes), "r") as zin:
         parts: Dict[str, bytes] = {n: zin.read(n) for n in zin.namelist()}
+
     theme_colors = extract_theme_colors(parts)
 
-    for name, data in list(parts.items()):
-        if not name.endswith(".xml"):
-            continue
-        try:
-            root = ET.fromstring(data)
-        except ET.ParseError:
-            continue
+    # Liste des XML que l’on modifie vraiment. Les autres restent STRICTEMENT identiques.
+    targets_exact = {
+        "word/document.xml",
+        "word/styles.xml",
+        "word/numbering.xml",
+    }
+    footer_names = [n for n in parts if n.startswith("word/footer") and n.endswith(".xml")]
 
-        # traitements texte & formats
-        replace_years(root)
-        strip_actualisation_everywhere(root)
-        force_calibri(root)
-        red_to_black(root)  # texte rouge/bleu → noir
-
-        if name == "word/document.xml":
-            cover_sizes_cleanup(root)
-            tune_cover_shapes_spatial(root)
-            tables_and_numbering(root)  # ⚠️ plan désormais noir
-            reposition_small_icon(root, icon_left, icon_top)
-            remove_large_grey_rectangles(root, theme_colors)
-            # Puces rouges -> noires au niveau des paragraphes
-            force_red_bullets_black_in_paragraphs(root)
-            # Forçage final du titre « fiche de cours » à 22 pt (paragraphe + formes)
-            force_title_fiche_de_cours_22(root)
-
-        # Puces rouges -> noires (définitions)
-        if name == "word/numbering.xml":
-            force_red_bullets_black_in_numbering(root)
-
-        # Puces rouges -> noires (styles)
-        if name == "word/styles.xml":
-            force_red_bullets_black_in_styles(root)
-
-        if name.startswith("word/footer"):
-            force_footer_size_10(root)
-
-        parts[name] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
-
-    # Légende optionnelle (inchangé)
-    if legend_bytes and "word/document.xml" in parts and "word/_rels/document.xml.rels" in parts:
-        parts["word/document.xml"] = remove_legend_text(parts["word/document.xml"])
-        new_doc, new_rels, media = insert_legend_image(
-            parts["word/document.xml"],
-            parts["word/_rels/document.xml.rels"],
-            legend_bytes,
-            left_cm=legend_left,
-            top_cm=legend_top,
-            width_cm=legend_w,
-            height_cm=legend_h,
-        )
-        parts["word/document.xml"] = new_doc
-        parts["word/_rels/document.xml.rels"] = new_rels
-        parts[media[0]] = media[1]
-
+    # buffer de sortie
     out_buf = io.BytesIO()
     with zipfile.ZipFile(out_buf, "w", compression=zipfile.ZIP_DEFLATED) as zout:
-        for n, d in parts.items():
-            zout.writestr(n, d)
+
+        # 1) Parcours des fichiers du docx
+        for name, data in parts.items():
+            try:
+                if name in targets_exact or name in footer_names:
+                    root = ET.fromstring(data)
+
+                    # traitements communs "texte/format"
+                    replace_years(root)
+                    strip_actualisation_everywhere(root)
+                    force_calibri(root)
+                    redblue_to_black_on_runs(root)
+
+                    if name == "word/document.xml":
+                        # page de garde & plan
+                        cover_sizes_cleanup(root)
+                        tune_cover_shapes_spatial(root)
+                        tables_and_numbering(root)
+                        reposition_small_icon(root, icon_left, icon_top)
+                        remove_large_grey_rectangles(root, theme_colors)
+                        # puces rouges/bleues → noires au niveau des paragraphes
+                        force_rb_bullets_black_in_paragraphs(root)
+                        # forçage 22 pt pour « fiche de cours »
+                        force_title_fiche_de_cours_22(root)
+
+                    elif name == "word/numbering.xml":
+                        force_rb_bullets_black_in_numbering(root)
+
+                    elif name == "word/styles.xml":
+                        force_rb_bullets_black_in_styles(root)
+
+                    elif name in footer_names:
+                        force_footer_size_10(root)
+
+                    # écriture du XML modifié
+                    new_bytes = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+                    zout.writestr(name, new_bytes)
+                else:
+                    # on NE TOUCHE PAS aux autres pièces XML/RELS/etc.
+                    zout.writestr(name, data)
+
+            except ET.ParseError:
+                # si une pièce est mal parsée, on la laisse inchangée
+                zout.writestr(name, data)
+
+        # 2) Légende optionnelle (si image fournie)
+        if legend_bytes and ("word/document.xml" in parts) and ("word/_rels/document.xml.rels" in parts):
+            # relire la version "déjà écrite" dans l’archive puis réinjecter l’image
+            current_document = zout.read("word/document.xml") if "word/document.xml" in zout.namelist() else parts["word/document.xml"]
+            current_rels = zout.read("word/_rels/document.xml.rels") if "word/_rels/document.xml.rels" in zout.namelist() else parts["word/_rels/document.xml.rels"]
+
+            cleaned = remove_legend_text(current_document)
+            new_doc, new_rels, media = insert_legend_image(
+                cleaned,
+                current_rels,
+                legend_bytes,
+                left_cm=legend_left,
+                top_cm=legend_top,
+                width_cm=legend_w,
+                height_cm=legend_h,
+            )
+
+            # Réécrire les trois morceaux
+            zout.writestr("word/document.xml", new_doc)
+            zout.writestr("word/_rels/document.xml.rels", new_rels)
+            zout.writestr(media[0], media[1])
+
     return out_buf.getvalue()
 
 # ───────────────────────── Nom de fichier de sortie ────────────────
