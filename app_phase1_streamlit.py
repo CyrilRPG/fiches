@@ -550,7 +550,7 @@ def build_anchored_image(rId, width_cm, height_cm, left_cm, top_cm, name="Legend
     nvPicPr = ET.SubElement(pic, f"{{{PIC}}}nvPicPr")
     ET.SubElement(nvPicPr, f"{{{PIC}}}cNvPr", {"id": "0", "name": name + ".img"})
     ET.SubElement(nvPicPr, f"{{{PIC}}}cNvPicPr")
-    blipFill = ET.SubElement(pic, f"{{{PIC}}}blipFill"})
+    blipFill = ET.SubElement(pic, f"{{{PIC}}}blipFill")
     ET.SubElement(blipFill, f"{{{A}}}blip", {f"{{{R}}}embed": rId})
     stretch = ET.SubElement(blipFill, f"{{{A}}}stretch")
     ET.SubElement(stretch, f"{{{A}}}fillRect")
