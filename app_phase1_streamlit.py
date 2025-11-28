@@ -1075,10 +1075,7 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
     parent_map = {child: parent for parent in root.iter() for child in parent}
     removed_rids: Set[str] = set()
 
-    # Charger les modèles SVG normalisés pour comparaison
-    annonce_svg_model = _load_svg_model_bytes()
-    annonce_svg_normalized = _normalize_svg(annonce_svg_model) if annonce_svg_model else None
-    
+    # Charger le modèle SVG à PRÉSERVER (cible), tous les autres SVG seront supprimés
     cible_svg_model = None
     cible_svg_normalized = None
     possible_paths = []
@@ -1116,21 +1113,20 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
         # Vérifier si c'est un SVG
         is_svg = media_path.lower().endswith(".svg")
         data_normalized = None
-        
-        # Pour les SVG, utiliser la comparaison normalisée
+        svg_should_remove = False
+
+        # Pour les SVG, utiliser la comparaison normalisée :
+        #   - si la signature correspond à Cible.svg -> on garde
+        #   - sinon -> on supprime
         if is_svg:
             data_normalized = _normalize_svg(data)
-            if data_normalized:
-                # Vérifier si c'est une cible protégée
-                if cible_svg_normalized and data_normalized == cible_svg_normalized:
-                    continue  # Protéger les cibles, ne pas supprimer
-                # Vérifier si c'est une annonce à supprimer
-                if annonce_svg_normalized and data_normalized == annonce_svg_normalized:
-                    # C'est une annonce, on va la supprimer (on continue pour set match_hash = True)
-                    pass
-                else:
-                    # SVG inconnu, on ne le touche pas
+            if data_normalized and cible_svg_normalized:
+                if data_normalized == cible_svg_normalized:
+                    # Cible : on la préserve absolument
                     continue
+                else:
+                    # Tout autre SVG doit être supprimé
+                    svg_should_remove = True
         
         data_hash = _sha1(data)
         data_ah = _ahash(data)
@@ -1148,8 +1144,8 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
             if min(_hamming(data_ah, ah) for ah in megaphone_ahashes) <= 5:
                 match_hash = True
         
-        # Pour les SVG annonce normalisés, forcer la suppression
-        if is_svg and data_normalized and annonce_svg_normalized and data_normalized == annonce_svg_normalized:
+        # Pour les SVG non-cible, forcer la suppression
+        if is_svg and svg_should_remove:
             match_hash = True
 
         holder = None
@@ -1165,8 +1161,9 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
                 drawing = node2; break
             node2 = parent_map.get(node2)
 
-        # On ne supprime QUE si l'empreinte (exacte ou perceptuelle) correspond
-        # aux annonces, jamais aux cibles.
+        # On supprime si :
+        #   - l'empreinte correspond à un mégaphone (bitmap)
+        #   - OU si c'est un SVG non-cible
         should_remove = match_hash
 
         if should_remove and drawing is not None:
