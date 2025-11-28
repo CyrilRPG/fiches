@@ -1691,12 +1691,21 @@ st.markdown(
             --brand-card: rgba(255, 255, 255, 0.04);
             --brand-border: rgba(255, 255, 255, 0.08);
             --brand-text: #e3ecf7;
-            --brand-subtle: #94a3b8;
+            --brand-subtle: #c7d4e5;
         }}
-        body {{
+        body,
+        .stApp,
+        [data-testid="stAppViewContainer"] {{
             background: var(--brand-bg);
             color: var(--brand-text);
             font-family: 'Inter', 'SF Pro Display', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        }}
+        main .block-container {{
+            background: linear-gradient(180deg, rgba(12, 28, 52, 0.9), rgba(8, 17, 31, 0.92));
+            border-radius: 18px;
+            border: 1px solid var(--brand-border);
+            padding: 1.5rem 1.25rem;
+            box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
         }}
         .diploma-hero {{
             padding: 1.25rem 1.15rem;
@@ -1774,9 +1783,9 @@ st.markdown(
     """
     <div class="diploma-hero">
         <div class="diploma-chip">🧠 Fiches Diploma</div>
-        <h1 style="margin: 0.25rem 0; font-size: 2rem; color: var(--brand-text);">Harmonisation 2025-2026 en mode sombre</h1>
+        <h1 style="margin: 0.25rem 0; font-size: 2rem; color: var(--brand-text);">Harmonisation 2025-2026</h1>
         <p style="color: var(--brand-subtle); font-size: 1.02rem; max-width: 640px;">
-            Convertis tes fiches en un clic, avec les couleurs Diploma Santé.
+            Convertis tes fiches en un clic, aux couleurs Diploma Santé.
         </p>
     </div>
     """,
