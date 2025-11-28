@@ -803,21 +803,64 @@ def _load_svg_model_bytes() -> Optional[bytes]:
 
 def _normalize_svg(svg_bytes: bytes) -> Optional[bytes]:
     """
-    Normalise un SVG en parsant et re-sérialisant le XML.
-    Cela permet de comparer des SVG même si Word a modifié les espaces,
-    l'ordre des attributs, etc.
+    Normalise un SVG en extrayant uniquement les éléments géométriques
+    essentiels (paths, formes simples) et en ignorant les métadonnées,
+    styles et attributs de position sujets à variation.
+
+    L'objectif est d'obtenir une « signature visuelle » stable pour
+    comparer annonce.svg / cible.svg avec leurs équivalents Word.
     """
     try:
         root = ET.fromstring(svg_bytes)
-        # Re-sérialiser de manière normalisée
-        normalized = ET.tostring(root, encoding="utf-8", xml_declaration=False)
-        # Nettoyer les espaces superflus
-        normalized = re.sub(rb'\s+', b' ', normalized)
-        normalized = re.sub(rb'>\s+<', b'><', normalized)
-        return normalized.strip()
     except Exception:
-        # Si le parsing échoue, retourner None (pas un SVG valide)
         return None
+
+    def local_tag(el: ET.Element) -> str:
+        return el.tag.split("}", 1)[-1] if "}" in el.tag else el.tag
+
+    # Clés géométriques pertinentes par type de forme
+    geom_keys = {
+        "path": {"d"},
+        "polygon": {"points"},
+        "polyline": {"points"},
+        "circle": {"cx", "cy", "r"},
+        "ellipse": {"cx", "cy", "rx", "ry"},
+        "rect": {"x", "y", "width", "height", "rx", "ry"},
+        "line": {"x1", "y1", "x2", "y2"},
+    }
+
+    # Construire une liste de « signatures » de formes
+    shapes = []
+    for el in root.iter():
+        tag = local_tag(el)
+        if tag not in geom_keys:
+            continue
+        keys = geom_keys[tag]
+        attrs = []
+        for k, v in el.attrib.items():
+            lk = k.split("}", 1)[-1] if "}" in k else k
+            if lk in keys:
+                attrs.append(f"{lk}={v}")
+        if not attrs:
+            continue
+        attrs.sort()
+        shapes.append(f"{tag}|" + "|".join(attrs))
+
+    if not shapes:
+        # Repli : si on ne trouve pas de formes géométriques classiques,
+        # revenir à l'ancienne normalisation simple.
+        try:
+            norm = ET.tostring(root, encoding="utf-8", xml_declaration=False)
+            norm = re.sub(rb"\s+", b" ", norm)
+            norm = re.sub(rb">\s+<", b"><", norm)
+            return norm.strip()
+        except Exception:
+            return None
+
+    # Signature finale : liste triée des signatures de formes
+    shapes.sort()
+    sig = "\n".join(shapes).encode("utf-8")
+    return sig
 
 def _find_matching_svg_media(parts: Dict[str, bytes], svg_model: bytes) -> Set[str]:
     """
@@ -884,6 +927,8 @@ def _load_default_megaphone_hashes() -> Tuple[Set[str], Set[int]]:
                         with open(path, "rb") as f:
                             data = f.read()
                             sha_hashes.add(_sha1(data))
+                            # Pour les SVG, _ahash renvoie souvent None,
+                            # mais pour les PNG on obtient bien un hash perceptuel.
                             ah = _ahash(data)
                             if ah is not None:
                                 ahashes.add(ah)
@@ -1058,6 +1103,7 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
         if cible_svg_model:
             break
 
+    # 1) Images DrawingML : <a:blip r:embed="...">
     for blip in root.findall(".//a:blip", NS):
         rid = blip.get(f"{{{R}}}embed")
         if not rid or rid not in rmap:
@@ -1129,6 +1175,46 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
                 parent.remove(drawing)
                 removed_rids.add(rid)
 
+    # 2) Images VML : <v:imagedata r:id="..."> à l'intérieur de <w:pict>
+    for imdata in root.findall(".//v:imagedata", NS):
+        rid = imdata.get(f"{{{R}}}id") or imdata.get(f"{{{R}}}embed")
+        if not rid or rid not in rmap:
+            continue
+        media_path = rmap[rid]
+        if media_path not in parts:
+            continue
+        data = parts[media_path]
+
+        # VML porte souvent des bitmap (PNG/EMF) – on applique la même logique de hash
+        data_hash = _sha1(data)
+        data_ah = _ahash(data)
+
+        if data_hash in protected_hashes:
+            continue
+        if data_ah is not None and protected_ahashes:
+            if min(_hamming(data_ah, ah) for ah in protected_ahashes) <= 5:
+                continue
+
+        match_hash = data_hash in megaphone_hashes if megaphone_hashes else False
+        if not match_hash and data_ah is not None and megaphone_ahashes:
+            if min(_hamming(data_ah, ah) for ah in megaphone_ahashes) <= 5:
+                match_hash = True
+
+        if match_hash:
+            # Remonter à <w:pict> et le supprimer
+            node = imdata
+            pict = None
+            while node is not None:
+                if node.tag == f"{{{W}}}pict":
+                    pict = node
+                    break
+                node = parent_map.get(node)
+            if pict is not None:
+                parent = parent_map.get(pict)
+                if parent is not None:
+                    parent.remove(pict)
+                    removed_rids.add(rid)
+
     if removed_rids:
         for rel in list(rels_root.findall(f".//{{{P_REL}}}Relationship")):
             if (rel.get("Id") or "") in removed_rids:
@@ -1155,6 +1241,12 @@ def process_bytes(
     # les médias SVG identiques dans word/media/.
     svg_model_bytes = _load_svg_model_bytes()
     svg_media_to_remove: Set[str] = _find_matching_svg_media(parts, svg_model_bytes) if svg_model_bytes else set()
+    # Debug léger : nombre de SVG détectés comme annonces
+    # (affiché uniquement dans les logs serveur, pas dans le document)
+    try:
+        print(f"[DEBUG] SVG annonces candidats à supprimer : {len(svg_media_to_remove)}")
+    except Exception:
+        pass
 
     theme_colors = extract_theme_colors(parts)
 
