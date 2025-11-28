@@ -1728,13 +1728,13 @@ def process_bytes(
         and (n.lower().endswith(".png") or n.lower().endswith(".emf") or n.lower().endswith(".jpg") or n.lower().endswith(".jpeg"))
     )
     try:
-        print(f\"[DEBUG SVG] Total SVG trouvés dans word/media/ : {total_svg_count}\")
-        print(f\"[DEBUG SVG] SVG identifiés comme Cible (à garder) : {cible_svg_count}\")
-        print(f\"[DEBUG SVG] SVG identifiés pour suppression : {len(svg_paths_to_remove)}\")
-        print(f\"[DEBUG BMP] Total bitmaps (png/emf/jpg) : {total_bitmap_count}\")
-        print(f\"[DEBUG BMP] Bitmaps carrés annonce à supprimer : {len(bitmap_annonce_media_paths)}\")
+        print(f"[DEBUG SVG] Total SVG trouvés dans word/media/ : {total_svg_count}")
+        print(f"[DEBUG SVG] SVG identifiés comme Cible (à garder) : {cible_svg_count}")
+        print(f"[DEBUG SVG] SVG identifiés pour suppression : {len(svg_paths_to_remove)}")
+        print(f"[DEBUG BMP] Total bitmaps (png/emf/jpg) : {total_bitmap_count}")
+        print(f"[DEBUG BMP] Bitmaps carrés annonce à supprimer : {len(bitmap_annonce_media_paths)}")
         if bitmap_annonce_media_paths:
-            print(f\"[DEBUG BMP] Chemins bitmaps à supprimer : {list(bitmap_annonce_media_paths)[:5]}...\")
+            print(f"[DEBUG BMP] Chemins bitmaps à supprimer : {list(bitmap_annonce_media_paths)[:5]}...")
     except Exception:
         pass
 
