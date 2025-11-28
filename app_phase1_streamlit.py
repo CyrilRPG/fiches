@@ -38,6 +38,9 @@ REPL = "2025 - 2026"
 ANNONCE_SVG_SNIP = b"M1.98047 8.62184C1.88751 8.46071"
 CIBLE_SVG_SNIP   = b"M12.2656 2.73438 12.1094 1.32812"
 
+# Caractères décoratifs / symboles potentiellement affichés comme carrés dans Word
+ODD_SYMBOLS_PATTERN = re.compile(r"[\uE000-\uF8FF\u25A0-\u25FF\u2600-\u27BF]")
+
 ROMAN_TITLE_RE = re.compile(r"^\s*[IVXLC]+\s*[.)]?\s+.+", re.IGNORECASE)
 
 # ───────────────────────── Utils ───────────────────────────────────
@@ -132,7 +135,11 @@ def strip_actualisation_everywhere(root):
     )
     for t in root.findall(".//w:t", NS) + root.findall(".//a:t", NS):
         if t.text:
-            t.text = PAT.sub("", t.text)
+            # Supprimer les mentions de type \"ACTUALISATION\", etc.
+            new_txt = PAT.sub("", t.text)
+            # Supprimer également les symboles décoratifs susceptibles d'apparaître comme des carrés
+            new_txt = ODD_SYMBOLS_PATTERN.sub("", new_txt)
+            t.text = new_txt
 
 def force_calibri(root):
     for r in root.findall(".//w:r", NS):
