@@ -41,6 +41,14 @@ CIBLE_SVG_SNIP   = b"M12.2656 2.73438 12.1094 1.32812"
 # Caractères décoratifs / symboles potentiellement affichés comme carrés dans Word
 ODD_SYMBOLS_PATTERN = re.compile(r"[\uE000-\uF8FF\u25A0-\u25FF\u2600-\u27BF]")
 
+# Empreintes des bitmaps \"carrés\" issus des annonces (calculées sur assets/fichier_traite.docx)
+ANNONCE_SQUARE_BITMAP_HASHES = {
+    # Très petites images : icônes/carrés probables
+    "818440ed634067aa2598299a8e30c8777af318a3",  # word/media/image3.png (size=1829)
+    "68191c53e118952cacde7e0525a31bc2dd328270",  # word/media/image4.png (size=6725)
+    "79cea50836da9df36257c4aa1388a399dddf12fe",  # word/media/image6.png (size=11372)
+}
+
 ROMAN_TITLE_RE = re.compile(r"^\s*[IVXLC]+\s*[.)]?\s+.+", re.IGNORECASE)
 
 # ───────────────────────── Utils ───────────────────────────────────
@@ -784,6 +792,25 @@ def _ahash(b: bytes, size: int = 8) -> Optional[int]:
 
 def _hamming(a: int, b: int) -> int:
     return bin(a ^ b).count("1")
+
+def is_annonce_square_media(name: str, data: bytes) -> bool:
+    """
+    Détecte si un media bitmap (PNG/EMF/JPEG) correspond à un carré
+    issu d'une annonce, en se basant sur son hash SHA1 et sa taille.
+    """
+    lname = name.lower()
+    if not lname.startswith("word/media/"):
+        return False
+    if not (lname.endswith(".png") or lname.endswith(".emf") or lname.endswith(".jpg") or lname.endswith(".jpeg")):
+        return False
+    h = _sha1(data)
+    if h in ANNONCE_SQUARE_BITMAP_HASHES:
+        return True
+    # Sécurité : considérer comme carré toute TRÈS petite image PNG (< 2KB)
+    # à condition de ne pas être la légende ni d'autres images utiles.
+    if lname.endswith(".png") and len(data) < 2048 and "legende" not in lname:
+        return True
+    return False
 
 # ───────────────────────── SVG modèle (annonce) ──────────────────────
 def _load_svg_model_bytes() -> Optional[bytes]:
@@ -1684,21 +1711,35 @@ def process_bytes(
 
     # NOUVELLE APPROCHE : Identifier tous les SVG à supprimer (tous sauf Cible.svg)
     svg_paths_to_remove = _identify_svg_to_remove(parts)
-    
+
+    # Identifier les bitmaps \"carrés\" issus des annonces
+    bitmap_annonce_media_paths: Set[str] = set()
+    for name, data in parts.items():
+        if is_annonce_square_media(name, data):
+            bitmap_annonce_media_paths.add(name)
+
     # Debug détaillé
     total_svg_count = sum(1 for n in parts.keys() if n.lower().endswith(".svg") and "/media/" in n.lower())
     cible_svg_count = total_svg_count - len(svg_paths_to_remove)
+    total_bitmap_count = sum(
+        1
+        for n in parts.keys()
+        if n.lower().startswith("word/media/")
+        and (n.lower().endswith(".png") or n.lower().endswith(".emf") or n.lower().endswith(".jpg") or n.lower().endswith(".jpeg"))
+    )
     try:
-        print(f"[DEBUG SVG] Total SVG trouvés dans word/media/ : {total_svg_count}")
-        print(f"[DEBUG SVG] SVG identifiés comme Cible (à garder) : {cible_svg_count}")
-        print(f"[DEBUG SVG] SVG identifiés pour suppression : {len(svg_paths_to_remove)}")
-        if svg_paths_to_remove:
-            print(f"[DEBUG SVG] Chemins SVG à supprimer : {list(svg_paths_to_remove)[:5]}...")  # Limiter à 5 pour éviter spam
+        print(f\"[DEBUG SVG] Total SVG trouvés dans word/media/ : {total_svg_count}\")
+        print(f\"[DEBUG SVG] SVG identifiés comme Cible (à garder) : {cible_svg_count}\")
+        print(f\"[DEBUG SVG] SVG identifiés pour suppression : {len(svg_paths_to_remove)}\")
+        print(f\"[DEBUG BMP] Total bitmaps (png/emf/jpg) : {total_bitmap_count}\")
+        print(f\"[DEBUG BMP] Bitmaps carrés annonce à supprimer : {len(bitmap_annonce_media_paths)}\")
+        if bitmap_annonce_media_paths:
+            print(f\"[DEBUG BMP] Chemins bitmaps à supprimer : {list(bitmap_annonce_media_paths)[:5]}...\")
     except Exception:
         pass
-    
-    # Supprimer toutes les références aux SVG identifiés (version agressive)
-    _remove_svg_references_aggressive(parts, svg_paths_to_remove)
+
+    # Supprimer toutes les références aux SVG et bitmaps identifiés (version agressive)
+    _remove_svg_references_aggressive(parts, svg_paths_to_remove.union(bitmap_annonce_media_paths))
 
     theme_colors = extract_theme_colors(parts)
 
