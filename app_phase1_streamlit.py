@@ -981,8 +981,9 @@ def _load_cible_svg_model() -> Optional[bytes]:
 def _identify_svg_to_remove(parts: Dict[str, bytes]) -> Set[str]:
     """
     Parcourt TOUS les fichiers word/media/*.svg et identifie ceux à supprimer.
-    Règle basée sur CIBLE_SVG_SNIP : on garde UNIQUEMENT les SVG contenant ce fragment,
-    on supprime TOUS les autres (annonces + autres SVG).
+    Règle fiable basée sur l'ID interne :
+      - SVG contenant \"Icons_Megaphone\" => ANNONCE, à supprimer
+      - tout le reste (ex. \"Icons_Bullseye\" pour les cibles) => à garder
     """
     svg_to_remove: Set[str] = set()
 
@@ -996,15 +997,12 @@ def _identify_svg_to_remove(parts: Dict[str, bytes]) -> Set[str]:
         if not lname.endswith(".svg"):
             continue
 
-        # Règle basée sur le fragment caractéristique de Cible.svg
-        # Si le SVG contient CIBLE_SVG_SNIP, on le garde (cible)
-        # Sinon, on le supprime (annonce ou autre)
-        if CIBLE_SVG_SNIP in data:
-            # Cible : on la garde, ne pas ajouter à svg_to_remove
-            continue
-        else:
-            # Annonce ou autre SVG : à supprimer
+        # Si le contenu contient \"Icons_Megaphone\" (insensible à la casse),
+        # on le considère comme une annonce à supprimer.
+        data_lower = data.lower()
+        if b"icons_megaphone" in data_lower:
             svg_to_remove.add(name)
+        # Sinon (bullseye/cible ou autres SVG) : on garde.
     
     return svg_to_remove
 
