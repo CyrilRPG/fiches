@@ -38,13 +38,6 @@ REPL = "2025 - 2026"
 ANNONCE_SVG_SNIP = b"M1.98047 8.62184C1.88751 8.46071"
 CIBLE_SVG_SNIP   = b"M12.2656 2.73438 12.1094 1.32812"
 
-# Empreintes des bitmaps carrés placeholders issus des annonces (calculées sur assets/fichier_traite.docx)
-ANNONCE_SQUARE_BITMAP_HASHES = {
-    "818440ed634067aa2598299a8e30c8777af318a3",  # word/media/image3.png (size=1829)
-    "68191c53e118952cacde7e0525a31bc2dd328270",  # word/media/image4.png (size=6725)
-    "79cea50836da9df36257c4aa1388a399dddf12fe",  # word/media/image6.png (size=11372)
-}
-
 ROMAN_TITLE_RE = re.compile(r"^\s*[IVXLC]+\s*[.)]?\s+.+", re.IGNORECASE)
 
 # ───────────────────────── Utils ───────────────────────────────────
@@ -785,22 +778,6 @@ def _ahash(b: bytes, size: int = 8) -> Optional[int]:
 def _hamming(a: int, b: int) -> int:
     return bin(a ^ b).count("1")
 
-def is_annonce_square_media(name: str, data: bytes) -> bool:
-    """
-    Détecte si un media bitmap (PNG/EMF/JPEG) correspond à un carré placeholder
-    issu d'une annonce, en se basant uniquement sur son hash SHA1.
-    
-    Les hash sont calculés sur les fichiers réels trouvés dans les documents traités
-    (ex: image3.png, image4.png, image6.png dans fichier_traite.docx).
-    """
-    lname = name.lower()
-    if not lname.startswith("word/media/"):
-        return False
-    if not (lname.endswith(".png") or lname.endswith(".emf") or lname.endswith(".jpg") or lname.endswith(".jpeg")):
-        return False
-    h = _sha1(data)
-    return h in ANNONCE_SQUARE_BITMAP_HASHES
-
 # ───────────────────────── SVG modèle (annonce) ──────────────────────
 def _load_svg_model_bytes() -> Optional[bytes]:
     """
@@ -970,8 +947,10 @@ def _load_cible_svg_model() -> Optional[bytes]:
 def _identify_svg_to_remove(parts: Dict[str, bytes]) -> Set[str]:
     """
     Parcourt TOUS les fichiers word/media/*.svg et identifie ceux à supprimer.
-    Règle : on supprime UNIQUEMENT les SVG annonces (Icons_Megaphone),
-    on garde TOUS les autres (cibles + autres SVG).
+    Règle simplifiée et robuste basée sur les IDs internes des icônes :
+      - SVG contenant \"Icons_Bullseye\"  => CIBLE, à garder
+      - SVG contenant \"Icons_Megaphone\" => ANNONCE, à supprimer
+      - tout autre SVG                   => à supprimer
     """
     svg_to_remove: Set[str] = set()
 
@@ -986,13 +965,14 @@ def _identify_svg_to_remove(parts: Dict[str, bytes]) -> Set[str]:
             continue
 
         # Heuristique basée sur l'attribut id vu dans les SVG Word :
-        #   - id="Icons_Megaphone" => annonce à supprimer
-        #   - tout le reste (cibles, autres SVG) => on garde
+        #   - id=\"Icons_Bullseye\"  => cible à préserver
+        #   - id=\"Icons_Megaphone\" => annonce à supprimer
         data_lower = data.lower()
-        if b'icons_megaphone' in data_lower:
-            # Annonce : on la supprime
-            svg_to_remove.add(name)
-        # Sinon (bullseye/cible ou autres SVG) : on garde.
+        if b'icons_bullseye' in data_lower:
+            # Cible : on la garde
+            continue
+        # Tout le reste (dont icons_megaphone*) est à supprimer
+        svg_to_remove.add(name)
     
     return svg_to_remove
 
@@ -1106,134 +1086,6 @@ def _resolve_target_path(base_part: str, target: str) -> str:
     base_dir = os.path.dirname(base_part)
     norm = os.path.normpath(os.path.join(base_dir, target))
     return norm.replace("\\", "/")
-
-def remove_bitmap_square_references(parts: Dict[str, bytes], bitmap_square_paths: Set[str]) -> None:
-    """
-    Supprime toutes les références aux bitmaps carrés placeholders identifiés.
-    - Supprime les <a:blip r:embed="rId"> et leurs <w:drawing> parents
-    - Supprime les <v:imagedata r:id="rId"> et leurs <w:pict> parents
-    - Supprime les relations dans les .rels
-    - Supprime physiquement les fichiers bitmaps de parts
-    """
-    if not bitmap_square_paths:
-        return
-    
-    # Étape 1 : Construire une map globale rId -> media_path en lisant tous les .rels
-    all_rid_to_media: Dict[str, str] = {}  # rId -> chemin media résolu
-    
-    for name in list(parts.keys()):
-        if not name.endswith(".rels") or "/_rels/" not in name:
-            continue
-        try:
-            rels_root = ET.fromstring(parts[name])
-            base_name = name.replace("/_rels/", "/").replace(".rels", "")
-            for rel in rels_root.findall(f".//{{{P_REL}}}Relationship"):
-                rid = rel.get("Id") or ""
-                tgt = rel.get("Target") or ""
-                if rid and tgt:
-                    media_path = _resolve_target_path(base_name, tgt)
-                    all_rid_to_media[rid] = media_path
-        except Exception:
-            continue
-    
-    # Étape 2 : Identifier tous les rIds qui pointent vers les bitmaps carrés
-    rids_to_remove_all = {rid for rid, path in all_rid_to_media.items() if path in bitmap_square_paths}
-    
-    # Étape 3 : Supprimer TOUS les blips/drawings avec ces rIds dans TOUTES les parties XML
-    for name, data in list(parts.items()):
-        if not name.endswith(".xml"):
-            continue
-        try:
-            root = ET.fromstring(data)
-        except Exception:
-            continue
-        
-        parent_map = {child: parent for parent in root.iter() for child in parent}
-        changed = False
-        
-        # Supprimer TOUS les blips avec les rIds identifiés
-        for blip in list(root.findall(".//a:blip", NS)):
-            rid = blip.get(f"{{{R}}}embed")
-            if rid in rids_to_remove_all:
-                # Remonter jusqu'à w:drawing et le supprimer
-                node = blip
-                drawing = None
-                while node is not None:
-                    if node.tag == f"{{{W}}}drawing":
-                        drawing = node
-                        break
-                    node = parent_map.get(node)
-                
-                if drawing is not None:
-                    parent = parent_map.get(drawing)
-                    if parent is not None:
-                        parent.remove(drawing)
-                        changed = True
-        
-        # Supprimer TOUS les imagedata VML avec les rIds identifiés
-        for imagedata in list(root.findall(f".//v:imagedata", NS)):
-            rid = imagedata.get(f"{{{R}}}id")
-            if rid in rids_to_remove_all:
-                node = imagedata
-                pict = None
-                while node is not None:
-                    if node.tag == f"{{{W}}}pict":
-                        pict = node
-                        break
-                    node = parent_map.get(node)
-                
-                if pict is not None:
-                    parent = parent_map.get(pict)
-                    if parent is not None:
-                        parent.remove(pict)
-                        changed = True
-        
-        # Nettoyer les runs vides après suppression des drawings
-        if changed:
-            # Supprimer les runs qui ne contiennent plus rien
-            for run in list(root.findall(".//w:r", NS)):
-                children = list(run)
-                if not children or all(child.tag == f"{{{W}}}rPr" for child in children):
-                    parent = parent_map.get(run)
-                    if parent is not None:
-                        parent.remove(run)
-                        changed = True
-            
-            # Supprimer les paragraphes vides
-            for para in list(root.findall(".//w:p", NS)):
-                children = list(para)
-                if not children or all(child.tag in (f"{{{W}}}pPr", f"{{{W}}}rPr") for child in children):
-                    # Vérifier qu'il n'y a pas de texte
-                    text_content = "".join(t.text or "" for t in para.findall(".//w:t", NS))
-                    if not text_content.strip():
-                        parent = parent_map.get(para)
-                        if parent is not None and parent.tag != f"{{{W}}}body":
-                            parent.remove(para)
-                            changed = True
-        
-        if changed:
-            parts[name] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
-    
-    # Étape 4 : Supprimer TOUTES les relations dans TOUS les .rels
-    for name in list(parts.keys()):
-        if not name.endswith(".rels") or "/_rels/" not in name:
-            continue
-        try:
-            rels_root = ET.fromstring(parts[name])
-            changed = False
-            for rel in list(rels_root.findall(f".//{{{P_REL}}}Relationship")):
-                rid = rel.get("Id") or ""
-                if rid in rids_to_remove_all:
-                    rels_root.remove(rel)
-                    changed = True
-            if changed:
-                parts[name] = ET.tostring(rels_root, encoding="utf-8", xml_declaration=True)
-        except Exception:
-            continue
-    
-    # Étape 5 : Supprimer physiquement les fichiers bitmaps de parts
-    for bitmap_path in bitmap_square_paths:
-        parts.pop(bitmap_path, None)
 
 def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str]) -> None:
     """
@@ -1536,14 +1388,18 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
         
         # Vérifier si c'est un SVG
         is_svg = media_path.lower().endswith(".svg")
-        
-        # IMPORTANT : on laisse désormais TOUT le traitement des SVG
-        # à la logique dédiée (_identify_svg_to_remove + _remove_svg_references)
-        # pour éviter de supprimer les cibles et autres SVG ici par erreur.
+        data_normalized = None
+        svg_should_remove = False
+
+        # Règle simple pour les SVG :
+        #   - si le contenu contient le fragment caractéristique de Cible.svg -> on garde
+        #   - sinon -> on supprime (Annonce ou autre SVG)
         if is_svg:
-            # Ne rien faire dans _remove_megaphones_in_part pour les SVG
-            # (ils seront traités par le pipeline SVG séparé).
-            continue
+            if CIBLE_SVG_SNIP in data:
+                # Cible : on la préserve absolument
+                continue
+            else:
+                svg_should_remove = True
         
         data_hash = _sha1(data)
         data_ah = _ahash(data)
@@ -1555,11 +1411,15 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
             if min(_hamming(data_ah, ah) for ah in protected_ahashes) <= 5:
                 continue
 
-        # Mégaphones bitmap à supprimer : hash exact OU hash perceptuel proche
+        # Mégaphones à supprimer : hash exact OU hash perceptuel proche
         match_hash = data_hash in megaphone_hashes if megaphone_hashes else False
         if not match_hash and data_ah is not None and megaphone_ahashes:
             if min(_hamming(data_ah, ah) for ah in megaphone_ahashes) <= 5:
                 match_hash = True
+        
+        # Pour les SVG non-cible, forcer la suppression
+        if is_svg and svg_should_remove:
+            match_hash = True
 
         holder = None
         node = blip
@@ -1574,8 +1434,9 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
                 drawing = node2; break
             node2 = parent_map.get(node2)
 
-        # On supprime si l'empreinte correspond à un mégaphone (bitmap uniquement)
-        # Les SVG sont gérés séparément par _identify_svg_to_remove
+        # On supprime si :
+        #   - l'empreinte correspond à un mégaphone (bitmap)
+        #   - OU si c'est un SVG non-cible
         should_remove = match_hash
 
         if should_remove and drawing is not None:
@@ -1663,30 +1524,6 @@ def process_bytes(
     
     # Supprimer toutes les références aux SVG identifiés
     _remove_svg_references(parts, svg_paths_to_remove)
-
-    # Identifier les bitmaps carrés placeholders issus des annonces
-    bitmap_square_paths: Set[str] = set()
-    for name, data in parts.items():
-        if is_annonce_square_media(name, data):
-            bitmap_square_paths.add(name)
-    
-    # Debug pour les bitmaps carrés
-    total_bitmap_count = sum(
-        1
-        for n in parts.keys()
-        if n.lower().startswith("word/media/")
-        and (n.lower().endswith(".png") or n.lower().endswith(".emf") or n.lower().endswith(".jpg") or n.lower().endswith(".jpeg"))
-    )
-    try:
-        print(f"[DEBUG BMP] Total bitmaps trouvés : {total_bitmap_count}")
-        print(f"[DEBUG BMP] Bitmaps carrés placeholders à supprimer : {len(bitmap_square_paths)}")
-        if bitmap_square_paths:
-            print(f"[DEBUG BMP] Chemins bitmaps carrés : {list(bitmap_square_paths)[:5]}...")
-    except Exception:
-        pass
-    
-    # Supprimer toutes les références aux bitmaps carrés
-    remove_bitmap_square_references(parts, bitmap_square_paths)
 
     theme_colors = extract_theme_colors(parts)
 
