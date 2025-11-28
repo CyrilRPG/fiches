@@ -1781,8 +1781,8 @@ st.markdown(
             --brand-panel: #0e1c31;
             --brand-card: rgba(255, 255, 255, 0.04);
             --brand-border: rgba(255, 255, 255, 0.08);
-            --brand-text: #e3ecf7;
-            --brand-subtle: #c7d4e5;
+            --brand-text: #ffffff;
+            --brand-subtle: #ffffff;
         }}
         body,
         .stApp,
