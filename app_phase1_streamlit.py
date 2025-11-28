@@ -309,14 +309,25 @@ def cover_sizes_cleanup(root):
                     )
             continue
         if "fiche de cours" in low:
-            set_size(paras[i], 22)
+            # Titre "Fiche de cours" en 20 pt
+            set_size(paras[i], 20)
+            # Bloc précédent non vide = matière, en 18 pt
+            for k in range(i - 1, -1, -1):
+                if get_text(paras[k]).strip():
+                    set_size(paras[k], 18)
+                    break
             last_was_fiche = True
             continue
         if last_was_fiche and txt:
-            set_size(paras[i], 20)
+            # Bloc juste après "Fiche de cours" = nom du cours, en 22 pt
+            set_size(paras[i], 22)
             last_was_fiche = False
-        if "université" in low and YEAR_PAT.search(txt.replace("\u00A0"," ")):
+        if "université" in low and (YEAR_PAT.search(txt.replace("\u00A0"," ")) or "universite" in low):
+            # Bloc université + année, en 10 pt
             set_size(paras[i], 10)
+        # Bloc "PLAN I / II ..." en 11 pt
+        if txt.strip().upper().startswith("PLAN"):
+            set_size(paras[i], 11)
 
 def tune_cover_shapes_spatial(root):
     holders = []
@@ -329,34 +340,36 @@ def tune_cover_shapes_spatial(root):
     if not holders:
         return
     holders.sort(key=lambda t: (t[0], t[1]))
+    # Bloc université + année en 10 pt et remplacer l'année
     for _, _, h, txt in holders:
         low = txt.lower()
-        if ("universite" in low or "université" in low) and YEAR_PAT.search(txt.replace("\u00A0"," ")):
-            # Force le bloc contenant l'université + année à n'afficher QUE "2025 - 2026"
+        if ("universite" in low or "université" in low):
             set_tx_size(h, 10.0)
-            tx = h.find(".//a:txBody", NS)
-            txbx = h.find(".//wps:txbx/w:txbxContent", NS)
-            text_nodes: List[ET.Element] = []
-            if tx is not None:
-                text_nodes.extend(tx.findall(".//a:t", NS))
-            if txbx is not None:
-                text_nodes.extend(txbx.findall(".//w:t", NS))
-            if text_nodes:
-                text_nodes[0].text = REPL
-                for tnode in text_nodes[1:]:
-                    tnode.text = ""
+    # Fiche de cours + matière + nom du cours
     idx_fiche = None
     for i, (_, _, h, txt) in enumerate(holders):
         if "fiche de cours" in txt.lower():
-            set_tx_size(h, 22.0)
+            # Titre "Fiche de cours" en 20 pt
+            set_tx_size(h, 20.0)
             idx_fiche = i
+            # Bloc précédent non vide = matière, en 18 pt
+            for k in range(i - 1, -1, -1):
+                prev_txt = holders[k][3].strip()
+                if prev_txt and "fiche de cours" not in prev_txt.lower():
+                    set_tx_size(holders[k][2], 18.0)
+                    break
             break
     if idx_fiche is not None:
+        # Bloc suivant non vide = nom du cours, en 22 pt
         for j in range(idx_fiche + 1, len(holders)):
             txt_next = holders[j][3].strip()
             if txt_next and "fiche de cours" not in txt_next.lower():
-                set_tx_size(holders[j][2], 20.0)
+                set_tx_size(holders[j][2], 22.0)
                 break
+    # Bloc "PLAN ..." en 11 pt
+    for _, _, h, txt in holders:
+        if txt.strip().upper().startswith("PLAN"):
+            set_tx_size(h, 11.0)
     for _, _, h, _ in holders:
         tx = h.find(".//a:txBody", NS)
         if tx is not None:
