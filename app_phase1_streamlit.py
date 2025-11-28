@@ -801,14 +801,39 @@ def _load_svg_model_bytes() -> Optional[bytes]:
                     continue
     return None
 
+def _normalize_svg(svg_bytes: bytes) -> Optional[bytes]:
+    """
+    Normalise un SVG en parsant et re-sérialisant le XML.
+    Cela permet de comparer des SVG même si Word a modifié les espaces,
+    l'ordre des attributs, etc.
+    """
+    try:
+        root = ET.fromstring(svg_bytes)
+        # Re-sérialiser de manière normalisée
+        normalized = ET.tostring(root, encoding="utf-8", xml_declaration=False)
+        # Nettoyer les espaces superflus
+        normalized = re.sub(rb'\s+', b' ', normalized)
+        normalized = re.sub(rb'>\s+<', b'><', normalized)
+        return normalized.strip()
+    except Exception:
+        # Si le parsing échoue, retourner None (pas un SVG valide)
+        return None
+
 def _find_matching_svg_media(parts: Dict[str, bytes], svg_model: bytes) -> Set[str]:
     """
     Retourne l'ensemble des chemins 'word/media/*.svg' dont le contenu
-    est exactement identique au SVG modèle fourni.
+    est identique au SVG modèle fourni (comparaison normalisée).
     """
     matches: Set[str] = set()
     if not svg_model:
         return matches
+    
+    # Normaliser le modèle une fois
+    normalized_model = _normalize_svg(svg_model)
+    if normalized_model is None:
+        # Si le modèle n'est pas un SVG valide, essayer comparaison exacte
+        normalized_model = svg_model
+    
     for name, data in parts.items():
         lname = name.lower()
         if not lname.startswith("word/"):
@@ -817,7 +842,15 @@ def _find_matching_svg_media(parts: Dict[str, bytes], svg_model: bytes) -> Set[s
             continue
         if not lname.endswith(".svg"):
             continue
-        if data == svg_model:
+        
+        # Normaliser le SVG du document
+        normalized_data = _normalize_svg(data)
+        if normalized_data is None:
+            # Si ce n'est pas un SVG valide, essayer comparaison exacte
+            normalized_data = data
+        
+        # Comparer les versions normalisées
+        if normalized_data == normalized_model:
             matches.add(name)
     return matches
 
@@ -997,6 +1030,34 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
     parent_map = {child: parent for parent in root.iter() for child in parent}
     removed_rids: Set[str] = set()
 
+    # Charger les modèles SVG normalisés pour comparaison
+    annonce_svg_model = _load_svg_model_bytes()
+    annonce_svg_normalized = _normalize_svg(annonce_svg_model) if annonce_svg_model else None
+    
+    cible_svg_model = None
+    cible_svg_normalized = None
+    possible_paths = []
+    try:
+        possible_paths.append(os.path.dirname(__file__))
+    except:
+        pass
+    possible_paths.extend([os.getcwd(), "."])
+    for base in possible_paths:
+        for fname in ["cible.svg", "Cible.svg"]:
+            p1 = os.path.join(base, "assets", fname)
+            p2 = os.path.join(base, fname)
+            for path in (p1, p2):
+                try:
+                    if os.path.exists(path):
+                        with open(path, "rb") as f:
+                            cible_svg_model = f.read()
+                            cible_svg_normalized = _normalize_svg(cible_svg_model)
+                            break
+                except OSError:
+                    continue
+        if cible_svg_model:
+            break
+
     for blip in root.findall(".//a:blip", NS):
         rid = blip.get(f"{{{R}}}embed")
         if not rid or rid not in rmap:
@@ -1005,6 +1066,26 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
         if media_path not in parts:
             continue
         data = parts[media_path]
+        
+        # Vérifier si c'est un SVG
+        is_svg = media_path.lower().endswith(".svg")
+        data_normalized = None
+        
+        # Pour les SVG, utiliser la comparaison normalisée
+        if is_svg:
+            data_normalized = _normalize_svg(data)
+            if data_normalized:
+                # Vérifier si c'est une cible protégée
+                if cible_svg_normalized and data_normalized == cible_svg_normalized:
+                    continue  # Protéger les cibles, ne pas supprimer
+                # Vérifier si c'est une annonce à supprimer
+                if annonce_svg_normalized and data_normalized == annonce_svg_normalized:
+                    # C'est une annonce, on va la supprimer (on continue pour set match_hash = True)
+                    pass
+                else:
+                    # SVG inconnu, on ne le touche pas
+                    continue
+        
         data_hash = _sha1(data)
         data_ah = _ahash(data)
 
@@ -1020,6 +1101,10 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
         if not match_hash and data_ah is not None and megaphone_ahashes:
             if min(_hamming(data_ah, ah) for ah in megaphone_ahashes) <= 5:
                 match_hash = True
+        
+        # Pour les SVG annonce normalisés, forcer la suppression
+        if is_svg and data_normalized and annonce_svg_normalized and data_normalized == annonce_svg_normalized:
+            match_hash = True
 
         holder = None
         node = blip
