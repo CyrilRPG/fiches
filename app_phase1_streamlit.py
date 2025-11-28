@@ -970,10 +970,8 @@ def _load_cible_svg_model() -> Optional[bytes]:
 def _identify_svg_to_remove(parts: Dict[str, bytes]) -> Set[str]:
     """
     Parcourt TOUS les fichiers word/media/*.svg et identifie ceux à supprimer.
-    Règle simplifiée et robuste basée sur les IDs internes des icônes :
-      - SVG contenant \"Icons_Bullseye\"  => CIBLE, à garder
-      - SVG contenant \"Icons_Megaphone\" => ANNONCE, à supprimer
-      - tout autre SVG                   => à supprimer
+    Règle : on supprime UNIQUEMENT les SVG annonces (Icons_Megaphone),
+    on garde TOUS les autres (cibles + autres SVG).
     """
     svg_to_remove: Set[str] = set()
 
@@ -988,14 +986,13 @@ def _identify_svg_to_remove(parts: Dict[str, bytes]) -> Set[str]:
             continue
 
         # Heuristique basée sur l'attribut id vu dans les SVG Word :
-        #   - id=\"Icons_Bullseye\"  => cible à préserver
-        #   - id=\"Icons_Megaphone\" => annonce à supprimer
+        #   - id="Icons_Megaphone" => annonce à supprimer
+        #   - tout le reste (cibles, autres SVG) => on garde
         data_lower = data.lower()
-        if b'icons_bullseye' in data_lower:
-            # Cible : on la garde
-            continue
-        # Tout le reste (dont icons_megaphone*) est à supprimer
-        svg_to_remove.add(name)
+        if b'icons_megaphone' in data_lower:
+            # Annonce : on la supprime
+            svg_to_remove.add(name)
+        # Sinon (bullseye/cible ou autres SVG) : on garde.
     
     return svg_to_remove
 
@@ -1539,18 +1536,14 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
         
         # Vérifier si c'est un SVG
         is_svg = media_path.lower().endswith(".svg")
-        data_normalized = None
-        svg_should_remove = False
-
-        # Règle simple pour les SVG :
-        #   - si le contenu contient le fragment caractéristique de Cible.svg -> on garde
-        #   - sinon -> on supprime (Annonce ou autre SVG)
+        
+        # IMPORTANT : on laisse désormais TOUT le traitement des SVG
+        # à la logique dédiée (_identify_svg_to_remove + _remove_svg_references)
+        # pour éviter de supprimer les cibles et autres SVG ici par erreur.
         if is_svg:
-            if CIBLE_SVG_SNIP in data:
-                # Cible : on la préserve absolument
-                continue
-            else:
-                svg_should_remove = True
+            # Ne rien faire dans _remove_megaphones_in_part pour les SVG
+            # (ils seront traités par le pipeline SVG séparé).
+            continue
         
         data_hash = _sha1(data)
         data_ah = _ahash(data)
@@ -1562,15 +1555,11 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
             if min(_hamming(data_ah, ah) for ah in protected_ahashes) <= 5:
                 continue
 
-        # Mégaphones à supprimer : hash exact OU hash perceptuel proche
+        # Mégaphones bitmap à supprimer : hash exact OU hash perceptuel proche
         match_hash = data_hash in megaphone_hashes if megaphone_hashes else False
         if not match_hash and data_ah is not None and megaphone_ahashes:
             if min(_hamming(data_ah, ah) for ah in megaphone_ahashes) <= 5:
                 match_hash = True
-        
-        # Pour les SVG non-cible, forcer la suppression
-        if is_svg and svg_should_remove:
-            match_hash = True
 
         holder = None
         node = blip
@@ -1585,9 +1574,8 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
                 drawing = node2; break
             node2 = parent_map.get(node2)
 
-        # On supprime si :
-        #   - l'empreinte correspond à un mégaphone (bitmap)
-        #   - OU si c'est un SVG non-cible
+        # On supprime si l'empreinte correspond à un mégaphone (bitmap uniquement)
+        # Les SVG sont gérés séparément par _identify_svg_to_remove
         should_remove = match_hash
 
         if should_remove and drawing is not None:
