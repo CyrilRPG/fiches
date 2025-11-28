@@ -1746,7 +1746,13 @@ def docx_bytes_to_pdf_bytes(docx_bytes: bytes) -> bytes:
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
-    pdf.set_font("Helvetica", size=12)
+
+    unicode_font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+    if os.path.exists(unicode_font_path):
+        pdf.add_font("DejaVu", "", unicode_font_path, uni=True)
+        pdf.set_font("DejaVu", size=12)
+    else:
+        pdf.set_font("Helvetica", size=12)
 
     line_height = 8
 
