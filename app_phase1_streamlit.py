@@ -30,7 +30,8 @@ YEAR_PAT = re.compile(
     r"[\u00A0\u2007\u202F\s]*[\-\u2010\u2011\u2012\u2013\u2014\u2212][\u00A0\u2007\u202F\s]*"
     r"(?:2024|2025))"
 )
-REPL = "2025-2026"
+# Ajout d'un espace après l'année cible pour éviter des collages du type "2025-2026UN"
+REPL = "2025-2026 "
 
 ROMAN_TITLE_RE = re.compile(r"^\s*[IVXLC]+\s*[.)]?\s+.+", re.IGNORECASE)
 
