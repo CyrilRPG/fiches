@@ -1087,6 +1087,59 @@ def _resolve_target_path(base_part: str, target: str) -> str:
     norm = os.path.normpath(os.path.join(base_dir, target))
     return norm.replace("\\", "/")
 
+def remove_drawing_for_rid(root: ET.Element, rid: str) -> bool:
+    """Supprime toutes les occurrences visuelles d'un rId donné dans un XML Word.
+
+    Cette fonction recherche tout run (<w:r>) contenant un élément avec l'attribut
+    r:embed (ou r:id) égal au rid fourni, puis supprime le run entier. Si le run
+    n'est pas directement accessible, on supprime son <w:drawing> ou son parent
+    <wp:inline>/<wp:anchor> pour éviter toute référence visuelle résiduelle.
+
+    Retourne True si au moins une suppression a été effectuée.
+    """
+    if not rid:
+        return False
+
+    parent_map = {child: parent for parent in root.iter() for child in parent}
+    runs_to_remove = []
+
+    for run in root.findall(".//w:r", NS):
+        contains_rid = False
+        for el in run.iter():
+            if el.get(f"{{{R}}}embed") == rid or el.get(f"{{{R}}}id") == rid:
+                contains_rid = True
+                break
+        if contains_rid:
+            runs_to_remove.append(run)
+
+    changed = False
+
+    for run in runs_to_remove:
+        parent = parent_map.get(run)
+        if parent is not None:
+            parent.remove(run)
+            changed = True
+            continue
+
+        drawing = run.find(".//w:drawing", NS)
+        if drawing is not None:
+            drawing_parent = parent_map.get(drawing)
+            if drawing_parent is not None:
+                drawing_parent.remove(drawing)
+                changed = True
+                continue
+
+        for tag in (f"{{{WP}}}inline", f"{{{WP}}}anchor"):
+            holder = run.find(f".//{tag}")
+            if holder is not None:
+                holder_parent = parent_map.get(holder)
+                if holder_parent is not None:
+                    holder_parent.remove(holder)
+                    changed = True
+                    break
+
+    return changed
+
 def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str]) -> None:
     """
     Supprime toutes les références aux SVG identifiés dans toutes les parties du document.
@@ -1144,16 +1197,22 @@ def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str
         
         # Obtenir les rIds à supprimer pour cette partie (peut être vide)
         rids_to_remove = media_to_rids.get(name, set())
-        
+
         # Construire aussi un set de tous les rIds à supprimer (toutes parties confondues)
         # pour être sûr de tout attraper
         all_rids_to_remove = set()
         for rids in media_to_rids.values():
             all_rids_to_remove.update(rids)
-        
-        parent_map = {child: parent for parent in root.iter() for child in parent}
+
         changed = False
-        
+
+        # Supprimer en amont tous les runs/drawings qui référencent directement ces rIds
+        for rid in all_rids_to_remove:
+            if remove_drawing_for_rid(root, rid):
+                changed = True
+
+        parent_map = {child: parent for parent in root.iter() for child in parent}
+
         # Supprimer les <a:blip r:embed="rId"> et leurs <w:drawing> parents
         for blip in root.findall(".//a:blip", NS):
             rid = blip.get(f"{{{R}}}embed")
