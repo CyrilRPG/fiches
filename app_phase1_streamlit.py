@@ -24,14 +24,14 @@ for k, v in NS.items():
     ET.register_namespace(k, v)
 
 # ───────────────────────── Règles/constantes ───────────────────────
-# Paires d'années à transformer vers 2025-2026 (espaces / tirets flexibles)
+# Paires d'années à transformer vers 2025 - 2026 (espaces / tirets flexibles)
 YEAR_PAT = re.compile(
     r"(?:(?:2023|2024)"
     r"[\u00A0\u2007\u202F\s]*[\-\u2010\u2011\u2012\u2013\u2014\u2212][\u00A0\u2007\u202F\s]*"
     r"(?:2024|2025))"
 )
-# Ajout d'un espace après l'année cible pour éviter des collages du type "2025-2026UN"
-REPL = "2025-2026 "
+# Remplacement standardisé
+REPL = "2025 - 2026"
 
 ROMAN_TITLE_RE = re.compile(r"^\s*[IVXLC]+\s*[.)]?\s+.+", re.IGNORECASE)
 
@@ -106,6 +106,10 @@ def replace_years(root):
             continue
         txt = "".join(t.text or "" for t in wts)
         new = YEAR_PAT.sub(REPL, txt)
+        # Si le texte commence par "2025 - 2026" suivi immédiatement de lettres
+        # (ex: "2025 - 2026UNIVERSITÉ ..."), on réduit à "2025 - 2026" seul.
+        if re.match(rf"^\s*{re.escape(REPL)}\s*[A-Za-zÀ-ÿ]", new):
+            new = REPL
         if new != txt:
             redistribute(wts, new)
     for tx in root.findall(".//a:txBody", NS):
@@ -114,6 +118,8 @@ def replace_years(root):
             continue
         txt = "".join(t.text or "" for t in ats)
         new = YEAR_PAT.sub(REPL, txt)
+        if re.match(rf"^\s*{re.escape(REPL)}\s*[A-Za-zÀ-ÿ]", new):
+            new = REPL
         if new != txt:
             redistribute(ats, new)
 
@@ -787,8 +793,27 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
                 drawing = node2; break
             node2 = parent_map.get(node2)
 
-        # Ne supprime que si l'image correspond explicitement à un mégaphone connu.
-        should_remove = match_hash
+        # Heuristique de secours : petites icônes très légères (mégaphones),
+        # pour le cas où Word ré-encode les images et change légèrement les octets.
+        is_tiny_square = False
+        if holder is not None:
+            extent = holder.find("wp:extent", NS)
+            if extent is not None:
+                try:
+                    cx = int(extent.get("cx", "0")); cy = int(extent.get("cy", "0"))
+                    wcm = emu_to_cm(cx); hcm = emu_to_cm(cy)
+                    # Vrais petits pictos ~1 cm, à peu près carrés
+                    if wcm <= 1.3 and hcm <= 1.3 and 0.7 <= (wcm / hcm if hcm else 1) <= 1.3:
+                        is_tiny_square = True
+                except Exception:
+                    is_tiny_square = False
+
+        is_very_light = len(data) <= 30 * 1024  # <= 30 Ko
+
+        # On supprime soit les images dont l'empreinte est connue,
+        # soit les très petits pictos carrés et légers (mégaphones),
+        # ce qui laisse intactes les autres icônes plus grandes (ex: icône écriture).
+        should_remove = match_hash or (is_tiny_square and is_very_light)
 
         if should_remove and drawing is not None:
             parent = parent_map.get(drawing)
