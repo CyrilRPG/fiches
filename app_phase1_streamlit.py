@@ -339,16 +339,16 @@ def tune_cover_shapes_spatial(root):
             if txt_next and "fiche de cours" not in txt_next.lower():
                 set_tx_size(holders[j][2], 20.0)
                 break
-        for _, _, h, _ in holders:
+    for _, _, h, _ in holders:
         tx = h.find(".//a:txBody", NS)
         if tx is not None:
             for t in tx.findall(".//a:t", NS):
                 if t.text:
-                        t.text = re.sub(
-                            r"(?iu)\b(actualisation|nouvelle\s+fiche|changements?\s+notables?|nouveau\s+cours|aucun\s+changement)\b",
-                            "",
-                            t.text,
-                        )
+                    t.text = re.sub(
+                        r"(?iu)\b(actualisation|nouvelle\s+fiche|changements?\s+notables?|nouveau\s+cours|aucun\s+changement)\b",
+                        "",
+                        t.text,
+                    )
         txbx = h.find(".//wps:txbx/w:txbxContent", NS)
         if txbx is not None:
             for t in txbx.findall(".//w:t", NS):
