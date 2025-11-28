@@ -1879,6 +1879,15 @@ st.markdown(
             font-weight: 700;
             color: var(--brand-text);
         }}
+        [data-testid="stSidebar"] h1,
+        [data-testid="stSidebar"] h2,
+        [data-testid="stSidebar"] h3,
+        [data-testid="stSidebar"] h4,
+        [data-testid="stSidebar"] p,
+        [data-testid="stSidebar"] span,
+        [data-testid="stSidebar"] label {{
+            color: var(--brand-text);
+        }}
         [data-testid="stSidebar"] > div {{
             background: var(--brand-panel);
         }}
