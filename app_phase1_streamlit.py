@@ -5,6 +5,7 @@ import re
 import os
 import unicodedata
 import hashlib
+from PIL import Image
 import xml.etree.ElementTree as ET
 from typing import Dict, Tuple, List, Optional, Set
 import streamlit as st
@@ -106,10 +107,9 @@ def replace_years(root):
             continue
         txt = "".join(t.text or "" for t in wts)
         new = YEAR_PAT.sub(REPL, txt)
-        # Si le motif '2025 - 2026' est immédiatement suivi de lettres majuscules
-        # (UN, UNI, PARIS, etc.), éventuellement après un petit espace,
-        # on supprime ces lettres pour garder uniquement '2025 - 2026'.
-        new = re.sub(rf"{re.escape(REPL)}\s*[A-ZÀ-Ý]+", REPL, new)
+        # Si le motif '2025 - 2026' est suivi de lettres (UN, P, Paris, etc.),
+        # on ne garde que '2025 - 2026'.
+        new = re.sub(rf"{re.escape(REPL)}\s*[A-Za-zÀ-ÿ]+", REPL, new)
         if new != txt:
             redistribute(wts, new)
     for tx in root.findall(".//a:txBody", NS):
@@ -118,7 +118,7 @@ def replace_years(root):
             continue
         txt = "".join(t.text or "" for t in ats)
         new = YEAR_PAT.sub(REPL, txt)
-        new = re.sub(rf"{re.escape(REPL)}\s*[A-ZÀ-Ý]+", REPL, new)
+        new = re.sub(rf"{re.escape(REPL)}\s*[A-Za-zÀ-ÿ]+", REPL, new)
         if new != txt:
             redistribute(ats, new)
 
@@ -732,12 +732,35 @@ def force_footer_size_10(root):
 def _sha1(b: bytes) -> str:
     return hashlib.sha1(b).hexdigest()
 
-def _load_default_megaphone_hashes() -> Set[str]:
+def _ahash(b: bytes, size: int = 8) -> Optional[int]:
+    """
+    Hash perceptuel très simple (average hash) pour comparer les petites icônes
+    même si Word les a légèrement recompressées ou redimensionnées.
+    Retourne un entier de size*size bits, ou None en cas d'erreur.
+    """
+    try:
+        with Image.open(io.BytesIO(b)) as im:
+            im = im.convert("L").resize((size, size), Image.LANCZOS)
+            pixels = list(im.getdata())
+    except Exception:
+        return None
+    avg = sum(pixels) / len(pixels)
+    bits = 0
+    for i, p in enumerate(pixels):
+        if p > avg:
+            bits |= (1 << i)
+    return bits
+
+def _hamming(a: int, b: int) -> int:
+    return bin(a ^ b).count("1")
+
+def _load_default_megaphone_hashes() -> Tuple[Set[str], Set[int]]:
     """
     Charge les icônes 'Annonce' fournies dans le dossier assets comme
     mégaphones à supprimer, sans toucher aux autres icônes de la fiche cible.
     """
-    hashes: Set[str] = set()
+    sha_hashes: Set[str] = set()
+    ahashes: Set[int] = set()
     candidates = ["Annonce1.png", "Annonce2.png"]
     
     # Essayer plusieurs chemins possibles pour trouver assets
@@ -758,16 +781,21 @@ def _load_default_megaphone_hashes() -> Set[str]:
                 try:
                     if os.path.exists(path):
                         with open(path, "rb") as f:
-                            hashes.add(_sha1(f.read()))
+                            data = f.read()
+                            sha_hashes.add(_sha1(data))
+                            ah = _ahash(data)
+                            if ah is not None:
+                                ahashes.add(ah)
                 except OSError:
                     pass
-    return hashes
+    return sha_hashes, ahashes
 
-def _load_protected_icon_hashes() -> Set[str]:
+def _load_protected_icon_hashes() -> Tuple[Set[str], Set[int]]:
     """
     Charge les icônes qui ne doivent JAMAIS être supprimées (ex: Cible.png).
     """
-    hashes: Set[str] = set()
+    sha_hashes: Set[str] = set()
+    ahashes: Set[int] = set()
     candidates = ["Cible.png"]
     
     # Essayer plusieurs chemins possibles pour trouver assets
@@ -788,10 +816,14 @@ def _load_protected_icon_hashes() -> Set[str]:
                 try:
                     if os.path.exists(path):
                         with open(path, "rb") as f:
-                            hashes.add(_sha1(f.read()))
+                            data = f.read()
+                            sha_hashes.add(_sha1(data))
+                            ah = _ahash(data)
+                            if ah is not None:
+                                ahashes.add(ah)
                 except OSError:
                     pass
-    return hashes
+    return sha_hashes, ahashes
 
 def _rels_name_for(part_name: str) -> str:
     d = os.path.dirname(part_name)
@@ -804,7 +836,8 @@ def _resolve_target_path(base_part: str, target: str) -> str:
     return norm.replace("\\", "/")
 
 def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET.Element,
-                               megaphone_hashes: Set[str]) -> None:
+                               megaphone_hashes: Set[str], megaphone_ahashes: Set[int],
+                               protected_hashes: Set[str], protected_ahashes: Set[int]) -> None:
     rels_name = _rels_name_for(part_name)
     if rels_name not in parts:
         return
@@ -822,8 +855,6 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
     parent_map = {child: parent for parent in root.iter() for child in parent}
     removed_rids: Set[str] = set()
 
-    protected_hashes = _load_protected_icon_hashes()
-
     for blip in root.findall(".//a:blip", NS):
         rid = blip.get(f"{{{R}}}embed")
         if not rid or rid not in rmap:
@@ -833,14 +864,20 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
             continue
         data = parts[media_path]
         data_hash = _sha1(data)
+        data_ah = _ahash(data)
 
         # Icônes protégées (ex: Cible.png) : on ne les touche jamais.
-        if protected_hashes and data_hash in protected_hashes:
+        if data_hash in protected_hashes:
             continue
+        if data_ah is not None and protected_ahashes:
+            if min(_hamming(data_ah, ah) for ah in protected_ahashes) <= 5:
+                continue
 
-        # Mégaphones à supprimer : uniquement si l'empreinte correspond
-        # à Annonce1/Annonce2 ou aux échantillons fournis.
+        # Mégaphones à supprimer : hash exact OU hash perceptuel proche
         match_hash = data_hash in megaphone_hashes if megaphone_hashes else False
+        if not match_hash and data_ah is not None and megaphone_ahashes:
+            if min(_hamming(data_ah, ah) for ah in megaphone_ahashes) <= 5:
+                match_hash = True
 
         holder = None
         node = blip
@@ -855,8 +892,8 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
                 drawing = node2; break
             node2 = parent_map.get(node2)
 
-        # On ne supprime QUE si l'empreinte correspond exactement à Annonce1/Annonce2
-        # Pas d'heuristique de taille pour éviter de toucher aux cibles
+        # On ne supprime QUE si l'empreinte (exacte ou perceptuelle) correspond
+        # aux annonces, jamais aux cibles.
         should_remove = match_hash
 
         if should_remove and drawing is not None:
@@ -892,13 +929,20 @@ def process_bytes(
     # Construire la liste des empreintes d'icônes à supprimer :
     #   - exemples fournis via l'UI (échantillons mégaphone)
     #   - icônes Annonce1/Annonce2 du dossier assets
-    megaphone_hashes: Set[str] = _load_default_megaphone_hashes()
+    default_meg_hashes, default_meg_ahashes = _load_default_megaphone_hashes()
+    megaphone_hashes: Set[str] = set(default_meg_hashes)
+    megaphone_ahashes: Set[int] = set(default_meg_ahashes)
     if megaphone_samples:
         for b in megaphone_samples:
             try:
                 megaphone_hashes.add(_sha1(b))
+                ah = _ahash(b)
+                if ah is not None:
+                    megaphone_ahashes.add(ah)
             except Exception:
                 pass
+
+    protected_hashes, protected_ahashes = _load_protected_icon_hashes()
 
     for name, data in list(parts.items()):
         if not name.endswith(".xml"):
@@ -933,7 +977,11 @@ def process_bytes(
         if name.startswith("word/footer"):
             force_footer_size_10(root)
 
-        _remove_megaphones_in_part(parts, name, root, megaphone_hashes)
+        _remove_megaphones_in_part(
+            parts, name, root,
+            megaphone_hashes, megaphone_ahashes,
+            protected_hashes, protected_ahashes,
+        )
 
         parts[name] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
