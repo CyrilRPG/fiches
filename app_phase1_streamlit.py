@@ -1094,6 +1094,108 @@ def _resolve_target_path(base_part: str, target: str) -> str:
     norm = os.path.normpath(os.path.join(base_dir, target))
     return norm.replace("\\", "/")
 
+def _remove_svg_references_aggressive(parts: Dict[str, bytes], svg_paths_to_remove: Set[str]) -> None:
+    """
+    Version agressive : supprime TOUS les drawings/blips qui pointent vers les SVG à supprimer,
+    en vérifiant directement les chemins dans les relations, pas seulement les rIds pré-calculés.
+    """
+    if not svg_paths_to_remove:
+        return
+    
+    # Étape 1 : Construire un map complet de TOUS les rIds -> chemins media
+    all_rid_to_media: Dict[str, str] = {}  # rId -> chemin media résolu
+    
+    for name in list(parts.keys()):
+        if not name.endswith(".rels") or "/_rels/" not in name:
+            continue
+        try:
+            rels_root = ET.fromstring(parts[name])
+            base_name = name.replace("/_rels/", "/").replace(".rels", "")
+            for rel in rels_root.findall(f".//{{{P_REL}}}Relationship"):
+                rid = rel.get("Id") or ""
+                tgt = rel.get("Target") or ""
+                if rid and tgt:
+                    media_path = _resolve_target_path(base_name, tgt)
+                    all_rid_to_media[rid] = media_path
+        except Exception:
+            continue
+    
+    # Étape 2 : Identifier TOUS les rIds qui pointent vers les SVG à supprimer
+    rids_to_remove_all = {rid for rid, path in all_rid_to_media.items() if path in svg_paths_to_remove}
+    
+    # Étape 3 : Supprimer TOUS les blips/drawings avec ces rIds dans TOUTES les parties XML
+    for name, data in list(parts.items()):
+        if not name.endswith(".xml"):
+            continue
+        try:
+            root = ET.fromstring(data)
+        except Exception:
+            continue
+        
+        parent_map = {child: parent for parent in root.iter() for child in parent}
+        changed = False
+        
+        # Supprimer TOUS les blips avec les rIds identifiés
+        for blip in list(root.findall(".//a:blip", NS)):
+            rid = blip.get(f"{{{R}}}embed")
+            if rid in rids_to_remove_all:
+                # Remonter jusqu'à w:drawing et le supprimer
+                node = blip
+                drawing = None
+                while node is not None:
+                    if node.tag == f"{{{W}}}drawing":
+                        drawing = node
+                        break
+                    node = parent_map.get(node)
+                
+                if drawing is not None:
+                    parent = parent_map.get(drawing)
+                    if parent is not None:
+                        parent.remove(drawing)
+                        changed = True
+        
+        # Supprimer TOUS les imagedata VML avec les rIds identifiés
+        for imagedata in list(root.findall(f".//v:imagedata", NS)):
+            rid = imagedata.get(f"{{{R}}}id")
+            if rid in rids_to_remove_all:
+                node = imagedata
+                pict = None
+                while node is not None:
+                    if node.tag == f"{{{W}}}pict":
+                        pict = node
+                        break
+                    node = parent_map.get(node)
+                
+                if pict is not None:
+                    parent = parent_map.get(pict)
+                    if parent is not None:
+                        parent.remove(pict)
+                        changed = True
+        
+        if changed:
+            parts[name] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+    
+    # Étape 4 : Supprimer TOUTES les relations dans TOUS les .rels
+    for name in list(parts.keys()):
+        if not name.endswith(".rels") or "/_rels/" not in name:
+            continue
+        try:
+            rels_root = ET.fromstring(parts[name])
+            changed = False
+            for rel in list(rels_root.findall(f".//{{{P_REL}}}Relationship")):
+                rid = rel.get("Id") or ""
+                if rid in rids_to_remove_all:
+                    rels_root.remove(rel)
+                    changed = True
+            if changed:
+                parts[name] = ET.tostring(rels_root, encoding="utf-8", xml_declaration=True)
+        except Exception:
+            continue
+    
+    # Étape 5 : Supprimer physiquement les fichiers SVG
+    for svg_path in svg_paths_to_remove:
+        parts.pop(svg_path, None)
+
 def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str]) -> None:
     """
     Supprime toutes les références aux SVG identifiés dans toutes les parties du document.
@@ -1529,8 +1631,8 @@ def process_bytes(
     except Exception:
         pass
     
-    # Supprimer toutes les références aux SVG identifiés
-    _remove_svg_references(parts, svg_paths_to_remove)
+    # Supprimer toutes les références aux SVG identifiés (version agressive)
+    _remove_svg_references_aggressive(parts, svg_paths_to_remove)
 
     theme_colors = extract_theme_colors(parts)
 
