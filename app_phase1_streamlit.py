@@ -981,10 +981,8 @@ def _load_cible_svg_model() -> Optional[bytes]:
 def _identify_svg_to_remove(parts: Dict[str, bytes]) -> Set[str]:
     """
     Parcourt TOUS les fichiers word/media/*.svg et identifie ceux à supprimer.
-    Règle simplifiée et robuste basée sur les IDs internes des icônes :
-      - SVG contenant \"Icons_Bullseye\"  => CIBLE, à garder
-      - SVG contenant \"Icons_Megaphone\" => ANNONCE, à supprimer
-      - tout autre SVG                   => à supprimer
+    Règle simple : on supprime UNIQUEMENT les SVG annonce (Icons_Megaphone),
+    on garde TOUS les autres (cibles + autres SVG).
     """
     svg_to_remove: Set[str] = set()
 
@@ -999,14 +997,13 @@ def _identify_svg_to_remove(parts: Dict[str, bytes]) -> Set[str]:
             continue
 
         # Heuristique basée sur l'attribut id vu dans les SVG Word :
-        #   - id=\"Icons_Bullseye\"  => cible à préserver
-        #   - id=\"Icons_Megaphone\" => annonce à supprimer
+        #   - id="Icons_Megaphone" => annonce à supprimer
+        #   - tout le reste (cibles, autres SVG) => on garde
         data_lower = data.lower()
-        if b'icons_bullseye' in data_lower:
-            # Cible : on la garde
-            continue
-        # Tout le reste (dont icons_megaphone*) est à supprimer
-        svg_to_remove.add(name)
+        if b'icons_megaphone' in data_lower:
+            # Annonce : on la supprime
+            svg_to_remove.add(name)
+        # Sinon : on garde (cibles + autres SVG)
     
     return svg_to_remove
 
