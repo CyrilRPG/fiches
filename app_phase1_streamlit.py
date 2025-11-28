@@ -774,53 +774,6 @@ def _ahash(b: bytes, size: int = 8) -> Optional[int]:
 def _hamming(a: int, b: int) -> int:
     return bin(a ^ b).count("1")
 
-# ───────────────────────── SVG modèle (annonce) ──────────────────────
-def _load_svg_model_bytes() -> Optional[bytes]:
-    """
-    Charge le SVG d'annonce de référence depuis assets/annonce.svg.
-    Retourne None si le fichier est introuvable.
-    """
-    candidates = ["annonce.svg", "Annonce.svg"]
-    possible_paths = []
-    try:
-        possible_paths.append(os.path.dirname(__file__))
-    except Exception:
-        pass
-    possible_paths.extend([os.getcwd(), "."])
-
-    for base in possible_paths:
-        for fname in candidates:
-            p1 = os.path.join(base, "assets", fname)
-            p2 = os.path.join(base, fname)
-            for path in (p1, p2):
-                try:
-                    if os.path.exists(path):
-                        with open(path, "rb") as f:
-                            return f.read()
-                except OSError:
-                    continue
-    return None
-
-def _find_matching_svg_media(parts: Dict[str, bytes], svg_model: bytes) -> Set[str]:
-    """
-    Retourne l'ensemble des chemins 'word/media/*.svg' dont le contenu
-    est exactement identique au SVG modèle fourni.
-    """
-    matches: Set[str] = set()
-    if not svg_model:
-        return matches
-    for name, data in parts.items():
-        lname = name.lower()
-        if not lname.startswith("word/"):
-            continue
-        if "/media/" not in lname:
-            continue
-        if not lname.endswith(".svg"):
-            continue
-        if data == svg_model:
-            matches.add(name)
-    return matches
-
 def _load_default_megaphone_hashes() -> Tuple[Set[str], Set[int]]:
     """
     Charge les icônes 'Annonce' fournies dans le dossier assets comme
@@ -903,79 +856,6 @@ def _resolve_target_path(base_part: str, target: str) -> str:
     base_dir = os.path.dirname(base_part)
     norm = os.path.normpath(os.path.join(base_dir, target))
     return norm.replace("\\", "/")
-
-def _remove_specific_svg_in_part(
-    parts: Dict[str, bytes],
-    part_name: str,
-    root: ET.Element,
-    svg_media_paths: Set[str],
-) -> None:
-    """
-    Supprime dans une partie donnée toutes les références aux SVG dont
-    le chemin figure dans svg_media_paths :
-      - <a:blip r:embed="rId"> et le <w:drawing> parent
-      - la relation correspondante dans _rels/part.rels
-    """
-    if not svg_media_paths:
-        return
-
-    rels_name = _rels_name_for(part_name)
-    if rels_name not in parts:
-        return
-    try:
-        rels_root = ET.fromstring(parts[rels_name])
-    except ET.ParseError:
-        return
-
-    # Map rId -> chemin media résolu
-    rmap: Dict[str, str] = {}
-    for rel in rels_root.findall(f".//{{{P_REL}}}Relationship"):
-        rid = rel.get("Id") or ""
-        tgt = rel.get("Target") or ""
-        if not rid or not tgt:
-            continue
-        rmap[rid] = _resolve_target_path(part_name, tgt)
-
-    # rId à supprimer (pointant vers un SVG modèle)
-    rids_to_remove: Set[str] = set()
-    for rid, mp in rmap.items():
-        if mp in svg_media_paths:
-            rids_to_remove.add(rid)
-
-    if not rids_to_remove:
-        return
-
-    # Construire la map parent -> enfant pour pouvoir supprimer proprement
-    parent_map = {child: parent for parent in root.iter() for child in parent}
-
-    # Supprimer les dessins/blips référencés
-    for blip in root.findall(".//a:blip", NS):
-        rid = blip.get(f"{{{R}}}embed")
-        if not rid or rid not in rids_to_remove:
-            continue
-        # Remonter jusqu'à w:drawing
-        node = blip
-        drawing = None
-        while node is not None:
-            if node.tag == f"{{{W}}}drawing":
-                drawing = node
-                break
-            node = parent_map.get(node)
-        if drawing is not None:
-            parent = parent_map.get(drawing)
-            if parent is not None:
-                parent.remove(drawing)
-
-    # Nettoyer les relations correspondantes
-    changed = False
-    for rel in list(rels_root.findall(f".//{{{P_REL}}}Relationship")):
-        rid = rel.get("Id") or ""
-        if rid in rids_to_remove:
-            rels_root.remove(rel)
-            changed = True
-
-    if changed:
-        parts[rels_name] = ET.tostring(rels_root, encoding="utf-8", xml_declaration=True)
 
 def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET.Element,
                                megaphone_hashes: Set[str], megaphone_ahashes: Set[int],
@@ -1066,11 +946,6 @@ def process_bytes(
     with zipfile.ZipFile(io.BytesIO(docx_bytes), "r") as zin:
         parts: Dict[str, bytes] = {n: zin.read(n) for n in zin.namelist()}
 
-    # Charger le SVG modèle d'annonce (assets/annonce.svg) et repérer
-    # les médias SVG identiques dans word/media/.
-    svg_model_bytes = _load_svg_model_bytes()
-    svg_media_to_remove: Set[str] = _find_matching_svg_media(parts, svg_model_bytes) if svg_model_bytes else set()
-
     theme_colors = extract_theme_colors(parts)
 
     # Construire la liste des empreintes d'icônes à supprimer :
@@ -1129,14 +1004,8 @@ def process_bytes(
             megaphone_hashes, megaphone_ahashes,
             protected_hashes, protected_ahashes,
         )
-        # Supprimer les SVG d'annonce exacts (annonce.svg)
-        _remove_specific_svg_in_part(parts, name, root, svg_media_to_remove)
 
         parts[name] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
-
-    # Retirer physiquement les fichiers SVG correspondants du package
-    for media_name in svg_media_to_remove:
-        parts.pop(media_name, None)
 
     if legend_bytes and "word/document.xml" in parts and "word/_rels/document.xml.rels" in parts:
         parts["word/document.xml"] = remove_legend_text(parts["word/document.xml"])
