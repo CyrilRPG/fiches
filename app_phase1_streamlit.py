@@ -977,14 +977,27 @@ def _load_cible_svg_model() -> Optional[bytes]:
                     continue
     return None
 
+def is_svg_annonce(data: bytes) -> bool:
+    """
+    Détecte si un SVG correspond à une annonce (Icons_Megaphone).
+    
+    Règle basée sur l'ID interne du SVG :
+    - Retourne True uniquement si le SVG contient "Icons_Megaphone" (insensible à la casse).
+    - Retourne False pour tous les autres SVG (cibles avec "Icons_Bullseye", autres SVG).
+    
+    Cette fonction est la source unique de vérité pour identifier les SVG annonces.
+    Les cibles et autres SVG ne doivent JAMAIS être touchés par cette fonction.
+    """
+    if not data:
+        return False
+    data_lower = data.lower()
+    return b"icons_megaphone" in data_lower
+
 def _identify_svg_to_remove(parts: Dict[str, bytes]) -> Set[str]:
     """
     Parcourt TOUS les fichiers word/media/*.svg et identifie ceux à supprimer.
-    Règle basée sur CIBLE_SVG_SNIP : on garde UNIQUEMENT les SVG contenant ce fragment,
-    on supprime TOUS les autres (annonces + autres SVG).
-    
-    NOTE: Cette logique fonctionnait mais laissait des carrés vides.
-    On la garde pour l'instant et on travaillera sur la suppression des carrés ensuite.
+    Utilise is_svg_annonce() pour la décision : seules les annonces sont marquées pour suppression.
+    Tous les autres SVG (cibles + autres) sont conservés.
     """
     svg_to_remove: Set[str] = set()
 
@@ -998,15 +1011,11 @@ def _identify_svg_to_remove(parts: Dict[str, bytes]) -> Set[str]:
         if not lname.endswith(".svg"):
             continue
 
-        # Règle basée sur le fragment caractéristique de Cible.svg
-        # Si le SVG contient CIBLE_SVG_SNIP, on le garde (cible)
-        # Sinon, on le supprime (annonce ou autre)
-        if CIBLE_SVG_SNIP in data:
-            # Cible : on la garde, ne pas ajouter à svg_to_remove
-            continue
-        else:
-            # Annonce ou autre SVG : à supprimer
+        # Utiliser la fonction centralisée de détection
+        # Seules les annonces (Icons_Megaphone) sont supprimées
+        if is_svg_annonce(data):
             svg_to_remove.add(name)
+        # Sinon (bullseye/cible ou autres SVG) : on garde.
     
     return svg_to_remove
 
@@ -1655,8 +1664,8 @@ def process_bytes(
     with zipfile.ZipFile(io.BytesIO(docx_bytes), "r") as zin:
         parts: Dict[str, bytes] = {n: zin.read(n) for n in zin.namelist()}
 
-    # Identifier tous les SVG à supprimer (tous sauf ceux contenant CIBLE_SVG_SNIP)
-    # Cette logique fonctionnait mais laissait des carrés vides - on travaillera dessus ensuite
+    # Identifier tous les SVG annonces à supprimer (via is_svg_annonce)
+    # Seules les annonces (Icons_Megaphone) sont supprimées, tous les autres SVG sont conservés
     svg_annonce_paths = _identify_svg_to_remove(parts)
 
     # Identifier les bitmaps carrés issus des annonces (via is_annonce_square_media)
