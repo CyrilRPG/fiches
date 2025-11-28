@@ -1686,46 +1686,51 @@ st.markdown(
     <style>
         :root {{
             --brand-blue: {PRIMARY_BLUE};
-            --brand-bg: linear-gradient(135deg, #f5f9ff 0%, #e9f1ff 45%, #f7fbff 100%);
+            --brand-bg: radial-gradient(circle at 20% 20%, #15335c 0%, #0c1c34 35%, #08111f 70%);
+            --brand-panel: #0e1c31;
+            --brand-card: rgba(255, 255, 255, 0.04);
+            --brand-border: rgba(255, 255, 255, 0.08);
+            --brand-text: #e3ecf7;
+            --brand-subtle: #94a3b8;
         }}
         body {{
             background: var(--brand-bg);
-            color: #0f172a;
+            color: var(--brand-text);
             font-family: 'Inter', 'SF Pro Display', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
         }}
         .diploma-hero {{
-            padding: 1.5rem 1.25rem;
-            border-radius: 16px;
-            background: white;
-            box-shadow: 0 20px 60px rgba(26, 109, 208, 0.12);
-            border: 1px solid rgba(26, 109, 208, 0.1);
+            padding: 1.25rem 1.15rem;
+            border-radius: 18px;
+            background: linear-gradient(145deg, rgba(26, 109, 208, 0.24), rgba(15, 35, 61, 0.95));
+            border: 1px solid rgba(26, 109, 208, 0.35);
+            box-shadow: 0 30px 90px rgba(0, 0, 0, 0.35);
         }}
         .diploma-chip {{
             display: inline-flex;
             align-items: center;
             gap: 8px;
-            padding: 6px 12px;
+            padding: 6px 14px;
             border-radius: 999px;
-            background: rgba(26, 109, 208, 0.12);
-            color: #0b3979;
+            background: rgba(255, 255, 255, 0.08);
+            color: var(--brand-text);
             font-weight: 600;
             font-size: 0.9rem;
             letter-spacing: 0.01em;
         }}
         .diploma-card {{
-            padding: 1.1rem 1rem;
+            padding: 1.15rem 1.05rem;
             border-radius: 14px;
-            background: white;
-            border: 1px solid rgba(15, 23, 42, 0.06);
-            box-shadow: 0 10px 35px rgba(26, 109, 208, 0.08);
+            background: var(--brand-card);
+            border: 1px solid var(--brand-border);
+            box-shadow: 0 18px 50px rgba(0, 0, 0, 0.35);
         }}
         .diploma-step h3 {{
             margin-bottom: 0.4rem;
-            color: #0b3979;
+            color: var(--brand-text);
         }}
         .diploma-step p {{
             margin: 0;
-            color: #334155;
+            color: var(--brand-subtle);
         }}
         .stButton button {{
             width: 100%;
@@ -1748,17 +1753,17 @@ st.markdown(
         }}
         .stDownloadButton button {{
             border-radius: 12px;
-            border: 1px solid rgba(26, 109, 208, 0.25);
-            color: #0b3979;
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            color: var(--brand-text);
             font-weight: 700;
-            background: white;
+            background: rgba(255, 255, 255, 0.06);
         }}
         .stRadio > label, .stFileUploader label, .stNumberInput label {{
             font-weight: 700;
-            color: #0f172a;
+            color: var(--brand-text);
         }}
         [data-testid="stSidebar"] > div {{
-            background: rgba(26, 109, 208, 0.06);
+            background: var(--brand-panel);
         }}
     </style>
     """,
@@ -1769,24 +1774,21 @@ st.markdown(
     """
     <div class="diploma-hero">
         <div class="diploma-chip">🧠 Fiches Diploma</div>
-        <h1 style="margin: 0.4rem 0 0.25rem; font-size: 2rem; color: #0f172a;">Transforme tes documents 2024-2025 en 2025-2026</h1>
-        <p style="color: #334155; font-size: 1.02rem; max-width: 720px;">
-            Harmonise les couleurs, puces, tailles, en-têtes et supprime les icônes et rectangles indésirables en un clic. Une expérience modernisée aux couleurs Diploma Santé.
+        <h1 style="margin: 0.25rem 0; font-size: 2rem; color: var(--brand-text);">Harmonisation 2025-2026 en mode sombre</h1>
+        <p style="color: var(--brand-subtle); font-size: 1.02rem; max-width: 640px;">
+            Convertis tes fiches en un clic, avec les couleurs Diploma Santé.
         </p>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
-with st.sidebar:
-    st.subheader("Paramètres (cm)")
-    st.caption("Ajuste finement les placements pour coller au template Diploma Santé.")
-    icon_left  = st.number_input("Icône écriture — gauche", value=15.3, step=0.1)
-    icon_top   = st.number_input("Icône écriture — haut",   value=11.0, step=0.1)
-    legend_left= st.number_input("Image Légendes — gauche", value=2.3, step=0.1)
-    legend_top = st.number_input("Image Légendes — haut",   value=23.8, step=0.1)
-    legend_w   = st.number_input("Image Légendes — largeur",value=5.68, step=0.01)
-    legend_h   = st.number_input("Image Légendes — hauteur",value=3.77, step=0.01)
+icon_left = 15.3
+icon_top = 11.0
+legend_left = 2.3
+legend_top = 23.8
+legend_w = 5.68
+legend_h = 3.77
 
 # Charger l'image de légende par défaut depuis assets
 default_legend_path = os.path.join("assets", "Legende.png")
@@ -1798,39 +1800,13 @@ if os.path.exists(default_legend_path):
     except Exception:
         default_legend_bytes = None
 
-st.markdown("### Ton flux en 3 étapes")
-step_cols = st.columns(3)
-steps = [
-    ("Dépose", "Glisse tes .docx 2024-2025"),
-    ("Personnalise", "Optionnel : légendes & mégaphones"),
-    ("Télécharge", "Récupère tes fiches harmonisées"),
-]
-for col, (title, desc) in zip(step_cols, steps):
-    with col:
-        st.markdown(
-            f"""
-            <div class="diploma-card diploma-step">
-                <h3>{title}</h3>
-                <p>{desc}</p>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
 st.markdown("#### Téléverse tes fichiers")
-files = st.file_uploader("DOCX à traiter", type=["docx"], accept_multiple_files=True, help="Tu peux sélectionner plusieurs fichiers en une fois.")
-
-with st.expander("Optionnel : légende et icônes personnalisées", expanded=True):
-    legend_col, mega_col = st.columns(2)
-    with legend_col:
-        st.markdown("**Remplace l'image de la Légende (PNG/JPG)**")
-        if default_legend_bytes:
-            st.info("ℹ️ L'image `assets/Legende.png` sera utilisée par défaut si aucune image n'est fournie.")
-        legend_file = st.file_uploader("Image Légendes", type=["png","jpg","jpeg","webp"], accept_multiple_files=False, key="legend")
-    with mega_col:
-        st.markdown("**Fournis 1–2 exemples d'icône mégaphone**")
-        st.caption("Nous créons une empreinte pour supprimer les mégaphones tout en préservant les icônes cibles.")
-        megaphone_files = st.file_uploader("Icônes mégaphone", type=["png","jpg","jpeg","webp"], accept_multiple_files=True, key="mega")
+files = st.file_uploader(
+    "DOCX à traiter",
+    type=["docx"],
+    accept_multiple_files=True,
+    help="Glisse simplement tes fichiers 2024-2025.",
+)
 
 st.markdown("---")
 st.markdown("### Lancer la conversion")
@@ -1839,8 +1815,8 @@ if st.button("⚙️ Harmoniser mes fiches", type="primary", disabled=not files)
     if not files:
         st.warning("Ajoute au moins un fichier .docx")
     else:
-        legend_bytes = legend_file.read() if legend_file else default_legend_bytes
-        megaphone_samples = [f.read() for f in megaphone_files] if megaphone_files else None
+        legend_bytes = default_legend_bytes
+        megaphone_samples = None
 
         processed: List[Tuple[str, bytes]] = []
         errors: List[str] = []
