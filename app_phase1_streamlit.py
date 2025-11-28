@@ -1804,6 +1804,22 @@ st.markdown(
             font-weight: 700;
             background: rgba(255, 255, 255, 0.06);
         }}
+        .stFileUploader [data-testid="stFileUploaderDropzone"] {{
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px dashed var(--brand-border);
+            color: var(--brand-text);
+        }}
+        .stFileUploader [data-testid="stFileUploaderDropzone"] div {{
+            color: var(--brand-subtle);
+        }}
+        .stFileUploader .uploadedFile {{
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid var(--brand-border);
+        }}
+        .stFileUploader .uploadedFileName {{
+            color: var(--brand-text);
+            font-weight: 700;
+        }}
         .stRadio > label, .stFileUploader label, .stNumberInput label {{
             font-weight: 700;
             color: var(--brand-text);
@@ -1822,7 +1838,7 @@ st.markdown(
         <div class="diploma-chip">🧠 Fiches Diploma</div>
         <h1 style="margin: 0.25rem 0; font-size: 2rem; color: var(--brand-text);">Harmonisation 2025-2026</h1>
         <p style="color: var(--brand-subtle); font-size: 1.02rem; max-width: 640px;">
-            Convertis tes fiches en un clic, aux couleurs Diploma Santé.
+            Convertis tes fiches en un clic.
         </p>
     </div>
     """,
