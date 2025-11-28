@@ -391,14 +391,20 @@ def tune_cover_shapes_spatial(root):
                     )
 
 def force_title_fiche_de_cours_22(root):
+    """
+    Historiquement : forçaient le titre \"Fiche de cours\" à 22 pt.
+    Désormais on aligne avec la nouvelle maquette :
+      - \"Fiche de cours\" en 20 pt
+      - le bloc suivant (nom du cours) en 22 pt
+    """
     for p in root.findall(".//w:p", NS):
         if "fiche de cours" in _norm_matchable(get_text(p)):
             for r in p.findall(".//w:r", NS):
-                set_run_props(r, size=22)
+                set_run_props(r, size=20)
     for holder in root.findall(".//wp:anchor", NS) + root.findall(".//wp:inline", NS):
         txt = get_tx_text(holder)
         if txt and "fiche de cours" in _norm_matchable(txt):
-            set_tx_size(holder, 22.0)
+            set_tx_size(holder, 20.0)
 
 def force_course_name_after_title_20(root):
     paras = root.findall(".//w:p", NS)
@@ -406,8 +412,9 @@ def force_course_name_after_title_20(root):
         if "fiche de cours" in _norm_matchable(get_text(p)):
             for j in range(i+1, len(paras)):
                 if get_text(paras[j]).strip():
+                    # Bloc suivant = nom du cours, en 22 pt
                     for r in paras[j].findall(".//w:r", NS):
-                        set_run_props(r, size=20)
+                        set_run_props(r, size=22)
                     break
             break
 
@@ -774,7 +781,8 @@ def _load_default_megaphone_hashes() -> Tuple[Set[str], Set[int]]:
     """
     sha_hashes: Set[str] = set()
     ahashes: Set[int] = set()
-    candidates = ["Annonce1.png", "Annonce2.png"]
+    # Icônes d'annonce fournies : PNG et SVG
+    candidates = ["Annonce1.png", "Annonce2.png", "Annonce.svg"]
     
     # Essayer plusieurs chemins possibles pour trouver assets
     possible_paths = []
@@ -809,7 +817,8 @@ def _load_protected_icon_hashes() -> Tuple[Set[str], Set[int]]:
     """
     sha_hashes: Set[str] = set()
     ahashes: Set[int] = set()
-    candidates = ["Cible.png"]
+    # Icônes de cible à protéger : PNG et SVG
+    candidates = ["Cible.png", "Cible.svg"]
     
     # Essayer plusieurs chemins possibles pour trouver assets
     possible_paths = []
