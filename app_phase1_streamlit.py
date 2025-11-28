@@ -333,7 +333,19 @@ def tune_cover_shapes_spatial(root):
     for _, _, h, txt in holders:
         low = txt.lower()
         if ("universite" in low or "université" in low) and YEAR_PAT.search(txt.replace("\u00A0"," ")):
+            # Force le bloc contenant l'université + année à n'afficher QUE "2025 - 2026"
             set_tx_size(h, 10.0)
+            tx = h.find(".//a:txBody", NS)
+            txbx = h.find(".//wps:txbx/w:txbxContent", NS)
+            text_nodes: List[ET.Element] = []
+            if tx is not None:
+                text_nodes.extend(tx.findall(".//a:t", NS))
+            if txbx is not None:
+                text_nodes.extend(txbx.findall(".//w:t", NS))
+            if text_nodes:
+                text_nodes[0].text = REPL
+                for tnode in text_nodes[1:]:
+                    tnode.text = ""
     idx_fiche = None
     for i, (_, _, h, txt) in enumerate(holders):
         if "fiche de cours" in txt.lower():
@@ -741,6 +753,24 @@ def _load_default_megaphone_hashes() -> Set[str]:
             pass
     return hashes
 
+def _load_protected_icon_hashes() -> Set[str]:
+    """
+    Charge les icônes qui ne doivent JAMAIS être supprimées (ex: Cible.png).
+    """
+    hashes: Set[str] = set()
+    base_dir = os.path.dirname(__file__)
+    candidates = [
+        os.path.join(base_dir, "assets", "Cible.png"),
+    ]
+    for path in candidates:
+        try:
+            with open(path, "rb") as f:
+                hashes.add(_sha1(f.read()))
+        except OSError:
+            # Si le fichier n'existe pas, on ignore.
+            pass
+    return hashes
+
 def _rels_name_for(part_name: str) -> str:
     d = os.path.dirname(part_name)
     b = os.path.basename(part_name)
@@ -770,6 +800,8 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
     parent_map = {child: parent for parent in root.iter() for child in parent}
     removed_rids: Set[str] = set()
 
+    protected_hashes = _load_protected_icon_hashes()
+
     for blip in root.findall(".//a:blip", NS):
         rid = blip.get(f"{{{R}}}embed")
         if not rid or rid not in rmap:
@@ -778,7 +810,13 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
         if media_path not in parts:
             continue
         data = parts[media_path]
-        match_hash = _sha1(data) in megaphone_hashes if megaphone_hashes else False
+        data_hash = _sha1(data)
+
+        # Icônes protégées (ex: Cible.png) : on ne les touche jamais.
+        if protected_hashes and data_hash in protected_hashes:
+            continue
+
+        match_hash = data_hash in megaphone_hashes if megaphone_hashes else False
 
         holder = None
         node = blip
