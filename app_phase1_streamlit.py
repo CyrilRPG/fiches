@@ -24,10 +24,13 @@ for k, v in NS.items():
     ET.register_namespace(k, v)
 
 # ───────────────────────── Règles/constantes ───────────────────────
+# Paires d'années à transformer vers 2025-2026 (espaces / tirets flexibles)
 YEAR_PAT = re.compile(
-    r"2024(?:[\u00A0\u2007\u202F\s]*[\-\u2010\u2011\u2012\u2013\u2014\u2212][\u00A0\u2007\u202F\s]*)2025"
+    r"(?:(?:2023|2024)"
+    r"[\u00A0\u2007\u202F\s]*[\-\u2010\u2011\u2012\u2013\u2014\u2212][\u00A0\u2007\u202F\s]*"
+    r"(?:2024|2025))"
 )
-REPL = "2025 - 2026"
+REPL = "2025-2026"
 
 ROMAN_TITLE_RE = re.compile(r"^\s*[IVXLC]+\s*[.)]?\s+.+", re.IGNORECASE)
 
@@ -114,7 +117,9 @@ def replace_years(root):
             redistribute(ats, new)
 
 def strip_actualisation_everywhere(root):
-    PAT = re.compile(r"(?iu)\b(actualisation|nouvelle\s+fiche|changements?\s+notables?|nouveau\s+cours)\b")
+    PAT = re.compile(
+        r"(?iu)\b(actualisation|nouvelle\s+fiche|changements?\s+notables?|nouveau\s+cours|aucun\s+changement)\b"
+    )
     for t in root.findall(".//w:t", NS) + root.findall(".//a:t", NS):
         if t.text:
             t.text = PAT.sub("", t.text)
@@ -282,10 +287,20 @@ def cover_sizes_cleanup(root):
     last_was_fiche = False
     for i, txt in enumerate(texts):
         low = txt.lower()
-        if txt.strip().upper() in ("ACTUALISATION", "NOUVELLE FICHE", "CHANGEMENTS NOTABLES", "NOUVEAU COURS"):
+        if txt.strip().upper() in (
+            "ACTUALISATION",
+            "NOUVELLE FICHE",
+            "CHANGEMENTS NOTABLES",
+            "NOUVEAU COURS",
+            "AUCUN CHANGEMENT",
+        ):
             for t in paras[i].findall(".//w:t", NS):
                 if t.text:
-                    t.text = re.sub(r"(?iu)\b(actualisation|nouvelle\s+fiche|changements?\s+notables?|nouveau\s+cours)\b", "", t.text)
+                    t.text = re.sub(
+                        r"(?iu)\b(actualisation|nouvelle\s+fiche|changements?\s+notables?|nouveau\s+cours|aucun\s+changement)\b",
+                        "",
+                        t.text,
+                    )
             continue
         if "fiche de cours" in low:
             set_size(paras[i], 22)
@@ -324,17 +339,25 @@ def tune_cover_shapes_spatial(root):
             if txt_next and "fiche de cours" not in txt_next.lower():
                 set_tx_size(holders[j][2], 20.0)
                 break
-    for _, _, h, _ in holders:
+        for _, _, h, _ in holders:
         tx = h.find(".//a:txBody", NS)
         if tx is not None:
             for t in tx.findall(".//a:t", NS):
                 if t.text:
-                    t.text = re.sub(r"(?iu)\b(actualisation|nouvelle\s+fiche|changements?\s+notables?|nouveau\s+cours)\b", "", t.text)
+                        t.text = re.sub(
+                            r"(?iu)\b(actualisation|nouvelle\s+fiche|changements?\s+notables?|nouveau\s+cours|aucun\s+changement)\b",
+                            "",
+                            t.text,
+                        )
         txbx = h.find(".//wps:txbx/w:txbxContent", NS)
         if txbx is not None:
             for t in txbx.findall(".//w:t", NS):
                 if t.text:
-                    t.text = re.sub(r"(?iu)\b(actualisation|nouvelle\s+fiche|changements?\s+notables?|nouveau\s+cours)\b", "", t.text)
+                    t.text = re.sub(
+                        r"(?iu)\b(actualisation|nouvelle\s+fiche|changements?\s+notables?|nouveau\s+cours|aucun\s+changement)\b",
+                        "",
+                        t.text,
+                    )
 
 def force_title_fiche_de_cours_22(root):
     for p in root.findall(".//w:p", NS):
@@ -691,6 +714,26 @@ def force_footer_size_10(root):
 def _sha1(b: bytes) -> str:
     return hashlib.sha1(b).hexdigest()
 
+def _load_default_megaphone_hashes() -> Set[str]:
+    """
+    Charge les icônes 'Annonce' fournies dans le dossier assets comme
+    mégaphones à supprimer, sans toucher aux autres icônes de la fiche cible.
+    """
+    hashes: Set[str] = set()
+    base_dir = os.path.dirname(__file__)
+    candidates = [
+        os.path.join(base_dir, "assets", "Annonce1.png"),
+        os.path.join(base_dir, "assets", "Annonce2.png"),
+    ]
+    for path in candidates:
+        try:
+            with open(path, "rb") as f:
+                hashes.add(_sha1(f.read()))
+        except OSError:
+            # Si le fichier n'existe pas (ex: déploiement différent), on ignore.
+            pass
+    return hashes
+
 def _rels_name_for(part_name: str) -> str:
     d = os.path.dirname(part_name)
     b = os.path.basename(part_name)
@@ -702,7 +745,7 @@ def _resolve_target_path(base_part: str, target: str) -> str:
     return norm.replace("\\", "/")
 
 def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET.Element,
-                               megaphone_hashes: Set[str], tiny_cm=1.3, max_kb=30) -> None:
+                               megaphone_hashes: Set[str]) -> None:
     rels_name = _rels_name_for(part_name)
     if rels_name not in parts:
         return
@@ -743,19 +786,8 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
                 drawing = node2; break
             node2 = parent_map.get(node2)
 
-        is_tiny = False
-        if holder is not None:
-            extent = holder.find("wp:extent", NS)
-            if extent is not None:
-                try:
-                    cx = int(extent.get("cx", "0")); cy = int(extent.get("cy", "0"))
-                    wcm = emu_to_cm(cx); hcm = emu_to_cm(cy)
-                    is_tiny = (wcm <= tiny_cm and hcm <= tiny_cm)
-                except Exception:
-                    is_tiny = False
-        is_light = (len(data) <= max_kb * 1024)
-
-        should_remove = match_hash or (is_tiny and is_light)
+        # Ne supprime que si l'image correspond explicitement à un mégaphone connu.
+        should_remove = match_hash
 
         if should_remove and drawing is not None:
             parent = parent_map.get(drawing)
@@ -787,7 +819,10 @@ def process_bytes(
 
     theme_colors = extract_theme_colors(parts)
 
-    megaphone_hashes: Set[str] = set()
+    # Construire la liste des empreintes d'icônes à supprimer :
+    #   - exemples fournis via l'UI (échantillons mégaphone)
+    #   - icônes Annonce1/Annonce2 du dossier assets
+    megaphone_hashes: Set[str] = _load_default_megaphone_hashes()
     if megaphone_samples:
         for b in megaphone_samples:
             try:
@@ -877,18 +912,30 @@ with st.sidebar:
     legend_w   = st.number_input("Image Légendes — largeur",value=5.68, step=0.01)
     legend_h   = st.number_input("Image Légendes — hauteur",value=3.77, step=0.01)
 
+# Charger l'image de légende par défaut depuis assets
+default_legend_path = os.path.join("assets", "Legende.png")
+default_legend_bytes = None
+if os.path.exists(default_legend_path):
+    try:
+        with open(default_legend_path, "rb") as f:
+            default_legend_bytes = f.read()
+    except Exception:
+        default_legend_bytes = None
+
 st.markdown("**1) Glisse/dépose un ou plusieurs fichiers .docx**")
 files = st.file_uploader("DOCX à traiter", type=["docx"], accept_multiple_files=True)
-st.markdown("**2) (Optionnel) Ajoute l’image de la Légende (PNG/JPG)**")
-legend_file = st.file_uploader("Image Légendes", type=["png","jpg","jpeg","webp"], accept_multiple_files=False)
-st.markdown("**3) (Optionnel) Fourni 1–2 exemples d’icône mégaphone (PNG/JPG) pour détection par empreinte**")
+st.markdown("**2) (Optionnel) Remplace l'image de la Légende (PNG/JPG)**")
+if default_legend_bytes:
+    st.info("ℹ️ L'image `assets/Legende.png` sera utilisée par défaut si aucune image n'est fournie.")
+legend_file = st.file_uploader("Image Légendes (optionnel)", type=["png","jpg","jpeg","webp"], accept_multiple_files=False)
+st.markdown("**3) (Optionnel) Fourni 1–2 exemples d'icône mégaphone (PNG/JPG) pour détection par empreinte**")
 megaphone_files = st.file_uploader("Icônes mégaphone (exemples)", type=["png","jpg","jpeg","webp"], accept_multiple_files=True)
 
 if st.button("⚙️ Lancer le traitement", type="primary", disabled=not files):
     if not files:
         st.warning("Ajoute au moins un fichier .docx")
     else:
-        legend_bytes = legend_file.read() if legend_file else None
+        legend_bytes = legend_file.read() if legend_file else default_legend_bytes
         megaphone_samples = [f.read() for f in megaphone_files] if megaphone_files else None
 
         processed: List[Tuple[str, bytes]] = []
