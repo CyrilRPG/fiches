@@ -1136,9 +1136,23 @@ def _remove_svg_references_aggressive(parts: Dict[str, bytes], svg_paths_to_remo
         changed = False
         
         # Supprimer TOUS les blips avec les rIds identifiés
+        # ET aussi les blips orphelins (qui pointent vers des rIds qui n'existent plus)
+        all_valid_rids = set(all_rid_to_media.keys())
+        
         for blip in list(root.findall(".//a:blip", NS)):
             rid = blip.get(f"{{{R}}}embed")
+            should_remove = False
+            
             if rid in rids_to_remove_all:
+                # rId identifié pour suppression
+                should_remove = True
+            elif rid and rid not in all_valid_rids:
+                # rId orphelin (la relation a été supprimée mais le blip reste)
+                # Vérifier si c'était un SVG (probablement un SVG annonce supprimé)
+                # On supprime par précaution si le rId n'existe plus
+                should_remove = True
+            
+            if should_remove:
                 # Remonter jusqu'à w:drawing et le supprimer
                 node = blip
                 drawing = None
@@ -1195,6 +1209,58 @@ def _remove_svg_references_aggressive(parts: Dict[str, bytes], svg_paths_to_remo
     # Étape 5 : Supprimer physiquement les fichiers SVG
     for svg_path in svg_paths_to_remove:
         parts.pop(svg_path, None)
+    
+    # Étape 6 : Supprimer aussi les images PNG/EMF qui pourraient être des placeholders
+    # créés par Word à partir des SVG annonce. On identifie ces images par leur taille
+    # (les placeholders sont généralement très petits) ou par leur relation avec les SVG supprimés.
+    # Pour l'instant, on supprime les très petites images PNG (< 5KB) qui pourraient être des placeholders
+    for name in list(parts.keys()):
+        if not name.startswith("word/media/"):
+            continue
+        if name.endswith(".svg"):
+            continue  # Déjà géré
+        if not (name.endswith(".png") or name.endswith(".emf") or name.endswith(".jpg") or name.endswith(".jpeg")):
+            continue
+        
+        # Vérifier si cette image est référencée par un rId qui était lié à un SVG supprimé
+        # ou si c'est une très petite image (probable placeholder)
+        try:
+            data = parts[name]
+            size = len(data)
+            
+            # Si l'image est très petite (< 5KB), elle pourrait être un placeholder
+            # Mais on ne supprime que si elle n'est pas référencée ailleurs de manière légitime
+            if size < 5000:
+                # Vérifier si cette image est référencée dans les relations
+                is_referenced = False
+                for rels_name in parts.keys():
+                    if not rels_name.endswith(".rels") or "/_rels/" not in rels_name:
+                        continue
+                    try:
+                        rels_root = ET.fromstring(parts[rels_name])
+                        base_name = rels_name.replace("/_rels/", "/").replace(".rels", "")
+                        for rel in rels_root.findall(f".//{{{P_REL}}}Relationship"):
+                            tgt = rel.get("Target", "")
+                            if tgt:
+                                resolved = _resolve_target_path(base_name, tgt)
+                                if resolved == name:
+                                    # Cette image est référencée, vérifier si c'est par un blip qui devrait être supprimé
+                                    rid = rel.get("Id", "")
+                                    if rid in rids_to_remove_all:
+                                        # C'est lié à un SVG supprimé, on peut supprimer cette image aussi
+                                        parts.pop(name, None)
+                                        # Supprimer aussi la relation
+                                        rels_root.remove(rel)
+                                        parts[rels_name] = ET.tostring(rels_root, encoding="utf-8", xml_declaration=True)
+                                        break
+                                    is_referenced = True
+                                    break
+                        if is_referenced:
+                            break
+                    except Exception:
+                        continue
+        except Exception:
+            continue
 
 def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str]) -> None:
     """
