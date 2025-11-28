@@ -5,6 +5,7 @@ import re
 import os
 import unicodedata
 import hashlib
+from dataclasses import dataclass
 from PIL import Image
 import xml.etree.ElementTree as ET
 from typing import Dict, Tuple, List, Optional, Set
@@ -288,7 +289,7 @@ def set_tx_size(holder, pt: float):
             set_run_props(r, size=pt)
 
 # ───────────────────────── Mise en forme couverture ────────────────
-def cover_sizes_cleanup(root):
+def cover_sizes_cleanup(root, config):
     paras = root.findall(".//w:p", NS)
     texts = [get_text(p).strip() for p in paras]
     def set_size(p, pt):
@@ -314,26 +315,26 @@ def cover_sizes_cleanup(root):
             continue
         if "fiche de cours" in low:
             # Titre "Fiche de cours" en 20 pt
-            set_size(paras[i], 20)
+            set_size(paras[i], config.cover_title_size)
             # Bloc précédent non vide = matière, en 18 pt
             for k in range(i - 1, -1, -1):
                 if get_text(paras[k]).strip():
-                    set_size(paras[k], 18)
+                    set_size(paras[k], config.cover_subject_size)
                     break
             last_was_fiche = True
             continue
         if last_was_fiche and txt:
             # Bloc juste après "Fiche de cours" = nom du cours, en 22 pt
-            set_size(paras[i], 22)
+            set_size(paras[i], config.course_name_size)
             last_was_fiche = False
         if "université" in low and (YEAR_PAT.search(txt.replace("\u00A0"," ")) or "universite" in low):
             # Bloc université + année, en 10 pt
-            set_size(paras[i], 10)
+            set_size(paras[i], config.university_year_size)
         # Bloc "PLAN I / II ..." en 11 pt
         if txt.strip().upper().startswith("PLAN"):
-            set_size(paras[i], 11)
+            set_size(paras[i], config.plan_size)
 
-def tune_cover_shapes_spatial(root):
+def tune_cover_shapes_spatial(root, config):
     holders = []
     for holder in root.findall(".//wp:anchor", NS) + root.findall(".//wp:inline", NS):
         txt = get_tx_text(holder)
@@ -348,19 +349,19 @@ def tune_cover_shapes_spatial(root):
     for _, _, h, txt in holders:
         low = txt.lower()
         if ("universite" in low or "université" in low):
-            set_tx_size(h, 10.0)
+            set_tx_size(h, config.university_year_size)
     # Fiche de cours + matière + nom du cours
     idx_fiche = None
     for i, (_, _, h, txt) in enumerate(holders):
         if "fiche de cours" in txt.lower():
             # Titre "Fiche de cours" en 20 pt
-            set_tx_size(h, 20.0)
+            set_tx_size(h, config.cover_title_size)
             idx_fiche = i
             # Bloc précédent non vide = matière, en 18 pt
             for k in range(i - 1, -1, -1):
                 prev_txt = holders[k][3].strip()
                 if prev_txt and "fiche de cours" not in prev_txt.lower():
-                    set_tx_size(holders[k][2], 18.0)
+                    set_tx_size(holders[k][2], config.cover_subject_size)
                     break
             break
     if idx_fiche is not None:
@@ -368,12 +369,12 @@ def tune_cover_shapes_spatial(root):
         for j in range(idx_fiche + 1, len(holders)):
             txt_next = holders[j][3].strip()
             if txt_next and "fiche de cours" not in txt_next.lower():
-                set_tx_size(holders[j][2], 22.0)
+                set_tx_size(holders[j][2], config.course_name_size)
                 break
     # Bloc "PLAN ..." en 11 pt
     for _, _, h, txt in holders:
         if txt.strip().upper().startswith("PLAN"):
-            set_tx_size(h, 11.0)
+            set_tx_size(h, config.plan_size)
     for _, _, h, _ in holders:
         tx = h.find(".//a:txBody", NS)
         if tx is not None:
@@ -394,7 +395,7 @@ def tune_cover_shapes_spatial(root):
                         t.text,
                     )
 
-def force_title_fiche_de_cours_22(root):
+def force_title_fiche_de_cours_22(root, config):
     """
     Historiquement : forçaient le titre \"Fiche de cours\" à 22 pt.
     Désormais on aligne avec la nouvelle maquette :
@@ -404,13 +405,13 @@ def force_title_fiche_de_cours_22(root):
     for p in root.findall(".//w:p", NS):
         if "fiche de cours" in _norm_matchable(get_text(p)):
             for r in p.findall(".//w:r", NS):
-                set_run_props(r, size=20)
+                set_run_props(r, size=config.cover_title_size)
     for holder in root.findall(".//wp:anchor", NS) + root.findall(".//wp:inline", NS):
         txt = get_tx_text(holder)
         if txt and "fiche de cours" in _norm_matchable(txt):
-            set_tx_size(holder, 20.0)
+            set_tx_size(holder, config.cover_title_size)
 
-def force_course_name_after_title_20(root):
+def force_course_name_after_title_20(root, config):
     paras = root.findall(".//w:p", NS)
     for i, p in enumerate(paras):
         if "fiche de cours" in _norm_matchable(get_text(p)):
@@ -418,7 +419,7 @@ def force_course_name_after_title_20(root):
                 if get_text(paras[j]).strip():
                     # Bloc suivant = nom du cours, en 22 pt
                     for r in paras[j].findall(".//w:r", NS):
-                        set_run_props(r, size=22)
+                        set_run_props(r, size=config.course_name_size)
                     break
             break
 
@@ -449,18 +450,18 @@ def _para_or_cell_has_dark_bg(p: ET.Element, parent_map: Dict[ET.Element, ET.Ele
                 return True
     return False
 
-def tables_and_numbering(root):
+def tables_and_numbering(root, config):
     for tbl in root.findall(".//w:tbl", NS):
         rows = tbl.findall(".//w:tr", NS)
         if not rows:
             continue
         for p in rows[0].findall(".//w:p", NS):
             for r in p.findall(".//w:r", NS):
-                set_run_props(r, size=12, bold=True)
+                set_run_props(r, size=config.table_header_size, bold=True)
         for tr in rows[1:]:
             for p in tr.findall(".//w:p", NS):
                 for r in p.findall(".//w:r", NS):
-                    set_run_props(r, size=9)
+                    set_run_props(r, size=config.table_body_size)
 
     parent_map = {child: parent for parent in root.iter() for child in parent}
     for p in root.findall(".//w:p", NS):
@@ -472,7 +473,7 @@ def tables_and_numbering(root):
         if not _para_or_cell_has_dark_bg(p, parent_map):
             continue
         for r in p.findall(".//w:r", NS):
-            set_run_props(r, size=10, bold=True, italic=True, color="FFFFFF")
+            set_run_props(r, size=config.dark_block_size, bold=True, italic=True, color="FFFFFF")
 
 # ───────────────────────── Helpers couleurs formes ─────────────────
 def _pct(val: Optional[str]) -> float:
@@ -745,12 +746,41 @@ def set_dml_text_size(root, pt: float):
         rPr = r.find("a:rPr", NS) or ET.SubElement(r, f"{{{A}}}rPr")
         rPr.set("sz", val)
 
-def force_footer_size_10(root):
+def force_footer_size_10(root, config):
     for r in root.findall(".//w:r", NS):
         if r.find("w:fldChar", NS) is not None or r.find("w:instrText", NS) is not None:
             continue
-        set_run_props(r, size=10)
-    set_dml_text_size(root, 10.0)
+        set_run_props(r, size=config.footer_size)
+    set_dml_text_size(root, config.footer_size)
+
+
+# ───────────────────────── Configuration utilisateur ───────────────
+@dataclass
+class ProcessingConfig:
+    icon_left: float = 15.3
+    icon_top: float = 11.0
+    legend_left: float = 2.3
+    legend_top: float = 23.8
+    legend_w: float = 5.68
+    legend_h: float = 3.77
+    cover_title_size: float = 20.0
+    cover_subject_size: float = 18.0
+    course_name_size: float = 22.0
+    university_year_size: float = 10.0
+    plan_size: float = 11.0
+    table_header_size: float = 12.0
+    table_body_size: float = 9.0
+    dark_block_size: float = 10.0
+    footer_size: float = 10.0
+    enable_replace_years: bool = True
+    enable_strip_actualisation: bool = True
+    enable_force_calibri: bool = True
+    enable_red_to_black: bool = True
+    enable_cover_typo_cleanup: bool = True
+    enable_tables_formatting: bool = True
+    enable_footer_resize: bool = True
+    enable_megaphone_removal: bool = True
+    enable_legend_insertion: bool = True
 
 # ───────────────────────── Suppression mégaphones ──────────────────
 def _sha1(b: bytes) -> str:
@@ -1561,7 +1591,17 @@ def process_bytes(
     legend_w=5.68,
     legend_h=3.77,
     megaphone_samples: Optional[List[bytes]] = None,
+    config: Optional[ProcessingConfig] = None,
 ) -> bytes:
+
+    cfg = config or ProcessingConfig(
+        icon_left=icon_left,
+        icon_top=icon_top,
+        legend_left=legend_left,
+        legend_top=legend_top,
+        legend_w=legend_w,
+        legend_h=legend_h,
+    )
 
     with zipfile.ZipFile(io.BytesIO(docx_bytes), "r") as zin:
         parts: Dict[str, bytes] = {n: zin.read(n) for n in zin.namelist()}
@@ -1613,48 +1653,62 @@ def process_bytes(
             continue
 
         # Texte & formats
-        replace_years(root)
-        strip_actualisation_everywhere(root)
-        force_calibri(root)
-        red_to_black(root)
+        if cfg.enable_replace_years:
+            replace_years(root)
+        if cfg.enable_strip_actualisation:
+            strip_actualisation_everywhere(root)
+        if cfg.enable_force_calibri:
+            force_calibri(root)
+        if cfg.enable_red_to_black:
+            red_to_black(root)
 
         if name == "word/document.xml":
-            cover_sizes_cleanup(root)
-            tune_cover_shapes_spatial(root)
-            tables_and_numbering(root)
-            force_course_name_after_title_20(root)
-            force_title_fiche_de_cours_22(root)
-            reposition_small_icon(root, icon_left, icon_top)
+            if cfg.enable_cover_typo_cleanup:
+                cover_sizes_cleanup(root, cfg)
+                tune_cover_shapes_spatial(root, cfg)
+                force_course_name_after_title_20(root, cfg)
+                force_title_fiche_de_cours_22(root, cfg)
+            if cfg.enable_tables_formatting:
+                tables_and_numbering(root, cfg)
+            reposition_small_icon(root, cfg.icon_left, cfg.icon_top)
             remove_large_grey_rectangles(root, theme_colors)
-            force_red_bullets_black_in_paragraphs(root)
+            if cfg.enable_red_to_black:
+                force_red_bullets_black_in_paragraphs(root)
 
-        if name == "word/numbering.xml":
+        if name == "word/numbering.xml" and cfg.enable_red_to_black:
             force_red_bullets_black_in_numbering(root)
 
-        if name == "word/styles.xml":
+        if name == "word/styles.xml" and cfg.enable_red_to_black:
             force_red_bullets_black_in_styles(root)
 
         if name.startswith("word/footer"):
-            force_footer_size_10(root)
+            if cfg.enable_footer_resize:
+                force_footer_size_10(root, cfg)
 
-        _remove_megaphones_in_part(
-            parts, name, root,
-            megaphone_hashes, megaphone_ahashes,
-            protected_hashes, protected_ahashes,
-        )
+        if cfg.enable_megaphone_removal:
+            _remove_megaphones_in_part(
+                parts, name, root,
+                megaphone_hashes, megaphone_ahashes,
+                protected_hashes, protected_ahashes,
+            )
 
         parts[name] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
-    if legend_bytes and "word/document.xml" in parts and "word/_rels/document.xml.rels" in parts:
+    if (
+        cfg.enable_legend_insertion
+        and legend_bytes
+        and "word/document.xml" in parts
+        and "word/_rels/document.xml.rels" in parts
+    ):
         parts["word/document.xml"] = remove_legend_text(parts["word/document.xml"])
         new_doc, new_rels, media = insert_legend_image(
             parts["word/document.xml"],
             parts["word/_rels/document.xml.rels"],
             legend_bytes,
-            left_cm=legend_left,
-            top_cm=legend_top,
-            width_cm=legend_w,
-            height_cm=legend_h,
+            left_cm=cfg.legend_left,
+            top_cm=cfg.legend_top,
+            width_cm=cfg.legend_w,
+            height_cm=cfg.legend_h,
         )
         parts["word/document.xml"] = new_doc
         parts["word/_rels/document.xml.rels"] = new_rels
@@ -1783,12 +1837,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-icon_left = 15.3
-icon_top = 11.0
-legend_left = 2.3
-legend_top = 23.8
-legend_w = 5.68
-legend_h = 3.77
+default_config = ProcessingConfig()
 
 # Charger l'image de légende par défaut depuis assets
 default_legend_path = os.path.join("assets", "Legende.png")
@@ -1799,6 +1848,93 @@ if os.path.exists(default_legend_path):
             default_legend_bytes = f.read()
     except Exception:
         default_legend_bytes = None
+
+with st.sidebar:
+    st.header("🛠️ Outils et réglages")
+    st.caption("Les valeurs préremplies correspondent à ta mise en forme actuelle.")
+
+    st.subheader("Positions des éléments (cm)")
+    icon_left = st.number_input("Icône écriture · X", value=default_config.icon_left, format="%.2f")
+    icon_top = st.number_input("Icône écriture · Y", value=default_config.icon_top, format="%.2f")
+
+    legend_left = st.number_input("Légende · X", value=default_config.legend_left, format="%.2f")
+    legend_top = st.number_input("Légende · Y", value=default_config.legend_top, format="%.2f")
+    legend_w = st.number_input("Légende · Largeur", value=default_config.legend_w, format="%.2f")
+    legend_h = st.number_input("Légende · Hauteur", value=default_config.legend_h, format="%.2f")
+    enable_legend = st.checkbox("Insérer la légende", value=default_config.enable_legend_insertion)
+
+    st.subheader("Polices principales (pt)")
+    cover_title_size = st.number_input('Titre "Fiche de cours"', value=default_config.cover_title_size, format="%.1f")
+    cover_subject_size = st.number_input("Matière sur la couverture", value=default_config.cover_subject_size, format="%.1f")
+    course_name_size = st.number_input("Nom du cours (juste après)", value=default_config.course_name_size, format="%.1f")
+    university_year_size = st.number_input("Bloc université + année", value=default_config.university_year_size, format="%.1f")
+    plan_size = st.number_input("Bloc PLAN", value=default_config.plan_size, format="%.1f")
+    table_header_size = st.number_input("Entêtes de tableau", value=default_config.table_header_size, format="%.1f")
+    table_body_size = st.number_input("Corps de tableau", value=default_config.table_body_size, format="%.1f")
+    dark_block_size = st.number_input("Titres sur fond bleu", value=default_config.dark_block_size, format="%.1f")
+    footer_size = st.number_input("Pieds de page", value=default_config.footer_size, format="%.1f")
+
+    with st.expander("Étapes du script", expanded=True):
+        enable_replace_years = st.checkbox("Remplacer 2023-2024 par 2025-2026", value=default_config.enable_replace_years)
+        enable_strip_actualisation = st.checkbox("Retirer les mentions d'actualisation", value=default_config.enable_strip_actualisation)
+        enable_force_calibri = st.checkbox("Forcer Calibri partout", value=default_config.enable_force_calibri)
+        enable_red_to_black = st.checkbox("Passer les rouges/bleus en noir", value=default_config.enable_red_to_black)
+        enable_cover_typo_cleanup = st.checkbox("Harmoniser la couverture", value=default_config.enable_cover_typo_cleanup)
+        enable_tables_formatting = st.checkbox("Normaliser tableaux et listes", value=default_config.enable_tables_formatting)
+        enable_footer_resize = st.checkbox("Ajuster la taille des pieds de page", value=default_config.enable_footer_resize)
+        enable_megaphone_removal = st.checkbox("Supprimer les mégaphones d'annonce", value=default_config.enable_megaphone_removal)
+
+    st.subheader("Actifs personnalisés")
+    legend_upload = st.file_uploader("Légende personnalisée", type=["png", "jpg", "jpeg", "svg"])
+    megaphone_uploads = st.file_uploader(
+        "Icônes à traiter comme mégaphone",
+        type=["png", "jpg", "jpeg", "svg"],
+        accept_multiple_files=True,
+        help="Ajoute tes propres échantillons d'icônes Annonce pour les supprimer automatiquement.",
+    )
+
+# Légende et icônes personnalisées (uploadées ou valeurs par défaut)
+legend_bytes = default_legend_bytes if default_legend_bytes else None
+if legend_upload is not None:
+    try:
+        legend_bytes = legend_upload.read()
+    except Exception:
+        legend_bytes = default_legend_bytes
+
+megaphone_samples = []
+if megaphone_uploads:
+    for up in megaphone_uploads:
+        try:
+            megaphone_samples.append(up.read())
+        except Exception:
+            continue
+
+config = ProcessingConfig(
+    icon_left=icon_left,
+    icon_top=icon_top,
+    legend_left=legend_left,
+    legend_top=legend_top,
+    legend_w=legend_w,
+    legend_h=legend_h,
+    cover_title_size=cover_title_size,
+    cover_subject_size=cover_subject_size,
+    course_name_size=course_name_size,
+    university_year_size=university_year_size,
+    plan_size=plan_size,
+    table_header_size=table_header_size,
+    table_body_size=table_body_size,
+    dark_block_size=dark_block_size,
+    footer_size=footer_size,
+    enable_replace_years=enable_replace_years,
+    enable_strip_actualisation=enable_strip_actualisation,
+    enable_force_calibri=enable_force_calibri,
+    enable_red_to_black=enable_red_to_black,
+    enable_cover_typo_cleanup=enable_cover_typo_cleanup,
+    enable_tables_formatting=enable_tables_formatting,
+    enable_footer_resize=enable_footer_resize,
+    enable_megaphone_removal=enable_megaphone_removal,
+    enable_legend_insertion=enable_legend,
+)
 
 st.markdown("#### Téléverse tes fichiers")
 files = st.file_uploader(
@@ -1815,9 +1951,6 @@ if st.button("⚙️ Harmoniser mes fiches", type="primary", disabled=not files)
     if not files:
         st.warning("Ajoute au moins un fichier .docx")
     else:
-        legend_bytes = default_legend_bytes
-        megaphone_samples = None
-
         processed: List[Tuple[str, bytes]] = []
         errors: List[str] = []
 
@@ -1825,14 +1958,9 @@ if st.button("⚙️ Harmoniser mes fiches", type="primary", disabled=not files)
             try:
                 out_bytes = process_bytes(
                     up.read(),
-                    legend_bytes=legend_bytes,
-                    icon_left=icon_left,
-                    icon_top=icon_top,
-                    legend_left=legend_left,
-                    legend_top=legend_top,
-                    legend_w=legend_w,
-                    legend_h=legend_h,
-                    megaphone_samples=megaphone_samples,
+                    legend_bytes=legend_bytes if config.enable_legend_insertion else None,
+                    megaphone_samples=megaphone_samples or None,
+                    config=config,
                 )
                 out_name = cleaned_filename(up.name)
                 processed.append((out_name, out_bytes))
