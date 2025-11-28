@@ -805,6 +805,60 @@ def _load_svg_model_bytes() -> Optional[bytes]:
                     continue
     return None
 
+def _extract_svg_paths(svg_bytes: bytes) -> List[str]:
+    """
+    Extrait tous les attributs 'd' des éléments <path> d'un SVG.
+    Retourne une liste de chemins normalisés (espaces supprimés, nombres normalisés).
+    """
+    paths = []
+    try:
+        root = ET.fromstring(svg_bytes)
+        for path_el in root.iter():
+            # Gérer les namespaces
+            tag = path_el.tag.split("}", 1)[-1] if "}" in path_el.tag else path_el.tag
+            if tag == "path":
+                d_attr = path_el.get("d") or ""
+                if d_attr:
+                    # Normaliser : supprimer espaces multiples, normaliser nombres
+                    normalized = re.sub(r"\s+", " ", d_attr.strip())
+                    paths.append(normalized)
+    except Exception:
+        pass
+    return paths
+
+def _svg_content_matches(svg_bytes: bytes, model_bytes: bytes) -> bool:
+    """
+    Compare deux SVG en extrayant et comparant leurs chemins <path d="...">.
+    Retourne True si les SVG correspondent (même contenu géométrique).
+    """
+    if not svg_bytes or not model_bytes:
+        return False
+    
+    svg_paths = _extract_svg_paths(svg_bytes)
+    model_paths = _extract_svg_paths(model_bytes)
+    
+    if not svg_paths or not model_paths:
+        # Si aucun chemin trouvé, comparaison par hash SHA1
+        return _sha1(svg_bytes) == _sha1(model_bytes)
+    
+    # Normaliser et trier les chemins pour comparaison
+    svg_paths_sorted = sorted(svg_paths)
+    model_paths_sorted = sorted(model_paths)
+    
+    # Si le nombre de chemins diffère beaucoup, pas de match
+    if abs(len(svg_paths_sorted) - len(model_paths_sorted)) > max(1, len(model_paths_sorted) * 0.2):
+        return False
+    
+    # Comparer les chemins : au moins 80% doivent correspondre
+    matches = 0
+    min_len = min(len(svg_paths_sorted), len(model_paths_sorted))
+    for i in range(min_len):
+        if svg_paths_sorted[i] == model_paths_sorted[i]:
+            matches += 1
+    
+    # Match si au moins 80% des chemins correspondent
+    return matches >= min_len * 0.8
+
 def _normalize_svg(svg_bytes: bytes) -> Optional[bytes]:
     """
     Normalise un SVG en extrayant uniquement les éléments géométriques
@@ -865,6 +919,62 @@ def _normalize_svg(svg_bytes: bytes) -> Optional[bytes]:
     shapes.sort()
     sig = "\n".join(shapes).encode("utf-8")
     return sig
+
+def _load_cible_svg_model() -> Optional[bytes]:
+    """
+    Charge le SVG modèle Cible.svg depuis assets/.
+    """
+    possible_paths = []
+    try:
+        possible_paths.append(os.path.dirname(__file__))
+    except:
+        pass
+    possible_paths.extend([os.getcwd(), "."])
+    
+    for base in possible_paths:
+        for fname in ["cible.svg", "Cible.svg"]:
+            p1 = os.path.join(base, "assets", fname)
+            p2 = os.path.join(base, fname)
+            for path in (p1, p2):
+                try:
+                    if os.path.exists(path):
+                        with open(path, "rb") as f:
+                            return f.read()
+                except OSError:
+                    continue
+    return None
+
+def _identify_svg_to_remove(parts: Dict[str, bytes]) -> Set[str]:
+    """
+    Parcourt TOUS les fichiers word/media/*.svg et identifie ceux à supprimer.
+    Seul Cible.svg est préservé, tous les autres SVG sont marqués pour suppression.
+    """
+    svg_to_remove: Set[str] = set()
+    cible_model = _load_cible_svg_model()
+    
+    if not cible_model:
+        # Si on ne trouve pas Cible.svg, on ne supprime rien (sécurité)
+        return svg_to_remove
+    
+    # Parcourir tous les SVG dans word/media/
+    for name, data in parts.items():
+        lname = name.lower()
+        if not lname.startswith("word/"):
+            continue
+        if "/media/" not in lname:
+            continue
+        if not lname.endswith(".svg"):
+            continue
+        
+        # Comparer avec Cible.svg
+        if _svg_content_matches(data, cible_model):
+            # C'est une cible, on la garde (ne pas ajouter à svg_to_remove)
+            continue
+        else:
+            # Ce n'est pas une cible, on le marque pour suppression
+            svg_to_remove.add(name)
+    
+    return svg_to_remove
 
 def _find_matching_svg_media(parts: Dict[str, bytes], svg_model: bytes) -> Set[str]:
     """
@@ -976,6 +1086,146 @@ def _resolve_target_path(base_part: str, target: str) -> str:
     base_dir = os.path.dirname(base_part)
     norm = os.path.normpath(os.path.join(base_dir, target))
     return norm.replace("\\", "/")
+
+def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str]) -> None:
+    """
+    Supprime toutes les références aux SVG identifiés dans toutes les parties du document.
+    - Supprime les <a:blip r:embed="rId"> et leurs <w:drawing> parents
+    - Supprime les <v:imagedata r:id="rId"> et leurs <w:pict> parents
+    - Supprime les relations dans les .rels
+    - Supprime physiquement les fichiers SVG de parts
+    """
+    if not svg_paths_to_remove:
+        return
+    
+    # Construire un map inversé : chemin media -> rId pour toutes les parties
+    media_to_rids: Dict[str, Set[str]] = {}  # part_name -> set of rIds
+    
+    # Parcourir tous les fichiers .rels pour trouver les références
+    for name in list(parts.keys()):
+        if not name.endswith(".rels"):
+            continue
+        if "/_rels/" not in name:
+            continue
+        
+        try:
+            rels_root = ET.fromstring(parts[name])
+        except ET.ParseError:
+            continue
+        
+        # Déterminer le nom de la partie parente
+        base_name = name.replace("/_rels/", "/").replace(".rels", "")
+        
+        for rel in rels_root.findall(f".//{{{P_REL}}}Relationship"):
+            rid = rel.get("Id") or ""
+            tgt = rel.get("Target") or ""
+            if not rid or not tgt:
+                continue
+            
+            # Résoudre le chemin complet du média
+            media_path = _resolve_target_path(base_name, tgt)
+            
+            # Si ce média est un SVG à supprimer, noter le rId
+            if media_path in svg_paths_to_remove:
+                if base_name not in media_to_rids:
+                    media_to_rids[base_name] = set()
+                media_to_rids[base_name].add(rid)
+    
+    # Maintenant, supprimer toutes les références dans les parties XML
+    for name, data in list(parts.items()):
+        if not name.endswith(".xml"):
+            continue
+        if name not in media_to_rids:
+            continue
+        
+        try:
+            root = ET.fromstring(data)
+        except ET.ParseError:
+            continue
+        
+        rids_to_remove = media_to_rids[name]
+        if not rids_to_remove:
+            continue
+        
+        parent_map = {child: parent for parent in root.iter() for child in parent}
+        changed = False
+        
+        # Supprimer les <a:blip r:embed="rId"> et leurs <w:drawing> parents
+        for blip in root.findall(".//a:blip", NS):
+            rid = blip.get(f"{{{R}}}embed")
+            if rid not in rids_to_remove:
+                continue
+            
+            # Remonter jusqu'à w:drawing
+            node = blip
+            drawing = None
+            while node is not None:
+                if node.tag == f"{{{W}}}drawing":
+                    drawing = node
+                    break
+                node = parent_map.get(node)
+            
+            if drawing is not None:
+                parent = parent_map.get(drawing)
+                if parent is not None:
+                    parent.remove(drawing)
+                    changed = True
+        
+        # Supprimer les <v:imagedata r:id="rId"> et leurs <w:pict> parents
+        for imagedata in root.findall(f".//v:imagedata", NS):
+            rid = imagedata.get(f"{{{R}}}id")
+            if rid not in rids_to_remove:
+                continue
+            
+            # Remonter jusqu'à w:pict
+            node = imagedata
+            pict = None
+            while node is not None:
+                if node.tag == f"{{{W}}}pict":
+                    pict = node
+                    break
+                node = parent_map.get(node)
+            
+            if pict is not None:
+                parent = parent_map.get(pict)
+                if parent is not None:
+                    parent.remove(pict)
+                    changed = True
+        
+        if changed:
+            parts[name] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+    
+    # Supprimer les relations dans les .rels
+    for name in list(parts.keys()):
+        if not name.endswith(".rels"):
+            continue
+        if "/_rels/" not in name:
+            continue
+        
+        try:
+            rels_root = ET.fromstring(parts[name])
+        except ET.ParseError:
+            continue
+        
+        base_name = name.replace("/_rels/", "/").replace(".rels", "")
+        rids_to_remove = media_to_rids.get(base_name, set())
+        
+        if not rids_to_remove:
+            continue
+        
+        changed = False
+        for rel in list(rels_root.findall(f".//{{{P_REL}}}Relationship")):
+            rid = rel.get("Id") or ""
+            if rid in rids_to_remove:
+                rels_root.remove(rel)
+                changed = True
+        
+        if changed:
+            parts[name] = ET.tostring(rels_root, encoding="utf-8", xml_declaration=True)
+    
+    # Supprimer physiquement les fichiers SVG de parts
+    for svg_path in svg_paths_to_remove:
+        parts.pop(svg_path, None)
 
 def _remove_specific_svg_in_part(
     parts: Dict[str, bytes],
@@ -1201,16 +1451,23 @@ def process_bytes(
     with zipfile.ZipFile(io.BytesIO(docx_bytes), "r") as zin:
         parts: Dict[str, bytes] = {n: zin.read(n) for n in zin.namelist()}
 
-    # Charger le SVG modèle d'annonce (assets/annonce.svg) et repérer
-    # les médias SVG identiques dans word/media/.
-    svg_model_bytes = _load_svg_model_bytes()
-    svg_media_to_remove: Set[str] = _find_matching_svg_media(parts, svg_model_bytes) if svg_model_bytes else set()
-    # Debug léger : nombre de SVG détectés comme annonces
-    # (affiché uniquement dans les logs serveur, pas dans le document)
+    # NOUVELLE APPROCHE : Identifier tous les SVG à supprimer (tous sauf Cible.svg)
+    svg_paths_to_remove = _identify_svg_to_remove(parts)
+    
+    # Debug détaillé
+    total_svg_count = sum(1 for n in parts.keys() if n.lower().endswith(".svg") and "/media/" in n.lower())
+    cible_svg_count = total_svg_count - len(svg_paths_to_remove)
     try:
-        print(f"[DEBUG] SVG annonces candidats à supprimer : {len(svg_media_to_remove)}")
+        print(f"[DEBUG SVG] Total SVG trouvés dans word/media/ : {total_svg_count}")
+        print(f"[DEBUG SVG] SVG identifiés comme Cible (à garder) : {cible_svg_count}")
+        print(f"[DEBUG SVG] SVG identifiés pour suppression : {len(svg_paths_to_remove)}")
+        if svg_paths_to_remove:
+            print(f"[DEBUG SVG] Chemins SVG à supprimer : {list(svg_paths_to_remove)[:5]}...")  # Limiter à 5 pour éviter spam
     except Exception:
         pass
+    
+    # Supprimer toutes les références aux SVG identifiés
+    _remove_svg_references(parts, svg_paths_to_remove)
 
     theme_colors = extract_theme_colors(parts)
 
@@ -1270,14 +1527,8 @@ def process_bytes(
             megaphone_hashes, megaphone_ahashes,
             protected_hashes, protected_ahashes,
         )
-        # Supprimer les SVG d'annonce exacts (annonce.svg)
-        _remove_specific_svg_in_part(parts, name, root, svg_media_to_remove)
 
         parts[name] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
-
-    # Retirer physiquement les fichiers SVG correspondants du package
-    for media_name in svg_media_to_remove:
-        parts.pop(media_name, None)
 
     if legend_bytes and "word/document.xml" in parts and "word/_rels/document.xml.rels" in parts:
         parts["word/document.xml"] = remove_legend_text(parts["word/document.xml"])
