@@ -796,7 +796,12 @@ def _hamming(a: int, b: int) -> int:
 def is_annonce_square_media(name: str, data: bytes) -> bool:
     """
     Détecte si un media bitmap (PNG/EMF/JPEG) correspond à un carré
-    issu d'une annonce, en se basant sur son hash SHA1 et sa taille.
+    issu d'une annonce, en se basant uniquement sur son hash SHA1.
+    
+    Les hash sont calculés sur les fichiers réels trouvés dans les documents traités
+    (ex: image3.png, image4.png, image6.png dans fichier_traite.docx).
+    
+    Ne fait plus d'heuristique supplémentaire pour éviter les faux positifs.
     """
     lname = name.lower()
     if not lname.startswith("word/media/"):
@@ -804,13 +809,7 @@ def is_annonce_square_media(name: str, data: bytes) -> bool:
     if not (lname.endswith(".png") or lname.endswith(".emf") or lname.endswith(".jpg") or lname.endswith(".jpeg")):
         return False
     h = _sha1(data)
-    if h in ANNONCE_SQUARE_BITMAP_HASHES:
-        return True
-    # Sécurité : considérer comme carré toute TRÈS petite image PNG (< 2KB)
-    # à condition de ne pas être la légende ni d'autres images utiles.
-    if lname.endswith(".png") and len(data) < 2048 and "legende" not in lname:
-        return True
-    return False
+    return h in ANNONCE_SQUARE_BITMAP_HASHES
 
 # ───────────────────────── SVG modèle (annonce) ──────────────────────
 def _load_svg_model_bytes() -> Optional[bytes]:
@@ -978,12 +977,26 @@ def _load_cible_svg_model() -> Optional[bytes]:
                     continue
     return None
 
+def is_svg_annonce(data: bytes) -> bool:
+    """
+    Détecte si un SVG correspond à une annonce (Icons_Megaphone).
+    
+    Règle basée sur l'ID interne du SVG :
+    - Retourne True uniquement si le SVG contient "Icons_Megaphone" (insensible à la casse).
+    - Retourne False pour tous les autres SVG (cibles avec "Icons_Bullseye", autres SVG).
+    
+    Cette fonction est la source unique de vérité pour identifier les SVG annonces.
+    Les cibles ne doivent JAMAIS être touchées par cette fonction.
+    """
+    if not data:
+        return False
+    data_lower = data.lower()
+    return b"icons_megaphone" in data_lower
+
 def _identify_svg_to_remove(parts: Dict[str, bytes]) -> Set[str]:
     """
     Parcourt TOUS les fichiers word/media/*.svg et identifie ceux à supprimer.
-    Règle fiable basée sur l'ID interne :
-      - SVG contenant \"Icons_Megaphone\" => ANNONCE, à supprimer
-      - tout le reste (ex. \"Icons_Bullseye\" pour les cibles) => à garder
+    Utilise is_svg_annonce() pour la décision : seules les annonces sont marquées pour suppression.
     """
     svg_to_remove: Set[str] = set()
 
@@ -997,10 +1010,8 @@ def _identify_svg_to_remove(parts: Dict[str, bytes]) -> Set[str]:
         if not lname.endswith(".svg"):
             continue
 
-        # Si le contenu contient \"Icons_Megaphone\" (insensible à la casse),
-        # on le considère comme une annonce à supprimer.
-        data_lower = data.lower()
-        if b"icons_megaphone" in data_lower:
+        # Utiliser la fonction centralisée de détection
+        if is_svg_annonce(data):
             svg_to_remove.add(name)
         # Sinon (bullseye/cible ou autres SVG) : on garde.
     
@@ -1117,12 +1128,19 @@ def _resolve_target_path(base_part: str, target: str) -> str:
     norm = os.path.normpath(os.path.join(base_dir, target))
     return norm.replace("\\", "/")
 
-def _remove_svg_references_aggressive(parts: Dict[str, bytes], svg_paths_to_remove: Set[str]) -> None:
+def remove_media_references(parts: Dict[str, bytes], media_paths_to_remove: Set[str]) -> None:
     """
-    Version agressive : supprime TOUS les drawings/blips qui pointent vers les SVG à supprimer,
-    en vérifiant directement les chemins dans les relations, pas seulement les rIds pré-calculés.
+    Supprime toutes les références aux media identifiés (SVG annonces + bitmaps carrés).
+    Fonction unifiée qui gère à la fois les SVG et les bitmaps.
+    
+    Étapes :
+    1. Construit une map globale rId -> media_path en lisant tous les .rels
+    2. Identifie tous les rIds pointant vers les media à supprimer
+    3. Supprime tous les blips/drawings/pict dans toutes les parties XML
+    4. Supprime toutes les relations dans les .rels
+    5. Supprime physiquement les fichiers media de parts
     """
-    if not svg_paths_to_remove:
+    if not media_paths_to_remove:
         return
     
     # Étape 1 : Construire un map complet de TOUS les rIds -> chemins media
@@ -1143,8 +1161,8 @@ def _remove_svg_references_aggressive(parts: Dict[str, bytes], svg_paths_to_remo
         except Exception:
             continue
     
-    # Étape 2 : Identifier TOUS les rIds qui pointent vers les SVG à supprimer
-    rids_to_remove_all = {rid for rid, path in all_rid_to_media.items() if path in svg_paths_to_remove}
+    # Étape 2 : Identifier TOUS les rIds qui pointent vers les media à supprimer
+    rids_to_remove_all = {rid for rid, path in all_rid_to_media.items() if path in media_paths_to_remove}
     
     # Étape 3 : Supprimer TOUS les blips/drawings avec ces rIds dans TOUTES les parties XML
     for name, data in list(parts.items()):
@@ -1229,61 +1247,9 @@ def _remove_svg_references_aggressive(parts: Dict[str, bytes], svg_paths_to_remo
         except Exception:
             continue
     
-    # Étape 5 : Supprimer physiquement les fichiers SVG
-    for svg_path in svg_paths_to_remove:
-        parts.pop(svg_path, None)
-    
-    # Étape 6 : Supprimer aussi les images PNG/EMF qui pourraient être des placeholders
-    # créés par Word à partir des SVG annonce. On identifie ces images par leur taille
-    # (les placeholders sont généralement très petits) ou par leur relation avec les SVG supprimés.
-    # Pour l'instant, on supprime les très petites images PNG (< 5KB) qui pourraient être des placeholders
-    for name in list(parts.keys()):
-        if not name.startswith("word/media/"):
-            continue
-        if name.endswith(".svg"):
-            continue  # Déjà géré
-        if not (name.endswith(".png") or name.endswith(".emf") or name.endswith(".jpg") or name.endswith(".jpeg")):
-            continue
-        
-        # Vérifier si cette image est référencée par un rId qui était lié à un SVG supprimé
-        # ou si c'est une très petite image (probable placeholder)
-        try:
-            data = parts[name]
-            size = len(data)
-            
-            # Si l'image est très petite (< 5KB), elle pourrait être un placeholder
-            # Mais on ne supprime que si elle n'est pas référencée ailleurs de manière légitime
-            if size < 5000:
-                # Vérifier si cette image est référencée dans les relations
-                is_referenced = False
-                for rels_name in parts.keys():
-                    if not rels_name.endswith(".rels") or "/_rels/" not in rels_name:
-                        continue
-                    try:
-                        rels_root = ET.fromstring(parts[rels_name])
-                        base_name = rels_name.replace("/_rels/", "/").replace(".rels", "")
-                        for rel in rels_root.findall(f".//{{{P_REL}}}Relationship"):
-                            tgt = rel.get("Target", "")
-                            if tgt:
-                                resolved = _resolve_target_path(base_name, tgt)
-                                if resolved == name:
-                                    # Cette image est référencée, vérifier si c'est par un blip qui devrait être supprimé
-                                    rid = rel.get("Id", "")
-                                    if rid in rids_to_remove_all:
-                                        # C'est lié à un SVG supprimé, on peut supprimer cette image aussi
-                                        parts.pop(name, None)
-                                        # Supprimer aussi la relation
-                                        rels_root.remove(rel)
-                                        parts[rels_name] = ET.tostring(rels_root, encoding="utf-8", xml_declaration=True)
-                                        break
-                                    is_referenced = True
-                                    break
-                        if is_referenced:
-                            break
-                    except Exception:
-                        continue
-        except Exception:
-            continue
+    # Étape 5 : Supprimer physiquement les fichiers media (SVG + bitmaps)
+    for media_path in media_paths_to_remove:
+        parts.pop(media_path, None)
 
 def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str]) -> None:
     """
@@ -1587,7 +1553,7 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
         # Vérifier si c'est un SVG
         is_svg = media_path.lower().endswith(".svg")
         # IMPORTANT : on laisse désormais TOUT le traitement des SVG
-        # à la logique dédiée (_identify_svg_to_remove + _remove_svg_references_aggressive)
+        # à la logique dédiée (_identify_svg_to_remove + remove_media_references)
         # pour éviter de supprimer les cibles ici par erreur.
         if is_svg:
             # Ne rien faire dans _remove_megaphones_in_part pour les SVG
@@ -1696,18 +1662,22 @@ def process_bytes(
     with zipfile.ZipFile(io.BytesIO(docx_bytes), "r") as zin:
         parts: Dict[str, bytes] = {n: zin.read(n) for n in zin.namelist()}
 
-    # NOUVELLE APPROCHE : Identifier tous les SVG à supprimer (tous sauf Cible.svg)
-    svg_paths_to_remove = _identify_svg_to_remove(parts)
+    # Identifier tous les SVG annonces à supprimer (via is_svg_annonce)
+    svg_annonce_paths = _identify_svg_to_remove(parts)
 
-    # Identifier les bitmaps \"carrés\" issus des annonces
+    # Identifier les bitmaps carrés issus des annonces (via is_annonce_square_media)
     bitmap_annonce_media_paths: Set[str] = set()
     for name, data in parts.items():
         if is_annonce_square_media(name, data):
             bitmap_annonce_media_paths.add(name)
 
+    # Union des media à supprimer (SVG annonces + bitmaps carrés)
+    media_paths_to_remove = svg_annonce_paths | bitmap_annonce_media_paths
+
     # Debug détaillé
     total_svg_count = sum(1 for n in parts.keys() if n.lower().endswith(".svg") and "/media/" in n.lower())
-    cible_svg_count = total_svg_count - len(svg_paths_to_remove)
+    svg_annonce_count = len(svg_annonce_paths)
+    svg_cible_count = total_svg_count - svg_annonce_count
     total_bitmap_count = sum(
         1
         for n in parts.keys()
@@ -1715,18 +1685,21 @@ def process_bytes(
         and (n.lower().endswith(".png") or n.lower().endswith(".emf") or n.lower().endswith(".jpg") or n.lower().endswith(".jpeg"))
     )
     try:
-        print(f"[DEBUG SVG] Total SVG trouvés dans word/media/ : {total_svg_count}")
-        print(f"[DEBUG SVG] SVG identifiés comme Cible (à garder) : {cible_svg_count}")
-        print(f"[DEBUG SVG] SVG identifiés pour suppression : {len(svg_paths_to_remove)}")
-        print(f"[DEBUG BMP] Total bitmaps (png/emf/jpg) : {total_bitmap_count}")
-        print(f"[DEBUG BMP] Bitmaps carrés annonce à supprimer : {len(bitmap_annonce_media_paths)}")
+        print(f"[DEBUG] Total SVG trouvés : {total_svg_count}")
+        print(f"[DEBUG] SVG annonces à supprimer : {svg_annonce_count}")
+        print(f"[DEBUG] SVG cibles à conserver : {svg_cible_count}")
+        print(f"[DEBUG] Total bitmaps : {total_bitmap_count}")
+        print(f"[DEBUG] Bitmaps carrés à supprimer : {len(bitmap_annonce_media_paths)}")
+        if svg_annonce_paths:
+            print(f"[DEBUG] Chemins SVG annonces : {list(svg_annonce_paths)[:3]}...")
         if bitmap_annonce_media_paths:
-            print(f"[DEBUG BMP] Chemins bitmaps à supprimer : {list(bitmap_annonce_media_paths)[:5]}...")
+            print(f"[DEBUG] Chemins bitmaps carrés : {list(bitmap_annonce_media_paths)[:3]}...")
     except Exception:
         pass
 
-    # Supprimer toutes les références aux SVG et bitmaps identifiés (version agressive)
-    _remove_svg_references_aggressive(parts, svg_paths_to_remove.union(bitmap_annonce_media_paths))
+    # Supprimer toutes les références aux media identifiés (SVG annonces + bitmaps carrés)
+    # Fonction unifiée qui gère à la fois les SVG et les bitmaps
+    remove_media_references(parts, media_paths_to_remove)
 
     theme_colors = extract_theme_colors(parts)
 
