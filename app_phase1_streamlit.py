@@ -1859,19 +1859,20 @@ st.markdown(
             background: rgba(255, 255, 255, 0.06);
         }}
         .stFileUploader [data-testid="stFileUploaderDropzone"] {{
-            background: rgba(255, 255, 255, 0.03);
-            border: 1px dashed var(--brand-border);
-            color: var(--brand-text);
+            background: #ffffff;
+            border: 1px dashed {PRIMARY_BLUE};
+            color: #0b1523;
         }}
         .stFileUploader [data-testid="stFileUploaderDropzone"] div {{
-            color: var(--brand-subtle);
+            color: #0b1523;
+            font-weight: 600;
         }}
         .stFileUploader .uploadedFile {{
-            background: rgba(255, 255, 255, 0.06);
-            border: 1px solid var(--brand-border);
+            background: #ffffff;
+            border: 1px solid {PRIMARY_BLUE};
         }}
         .stFileUploader .uploadedFileName {{
-            color: var(--brand-text);
+            color: #0b1523;
             font-weight: 700;
         }}
         .stRadio > label, .stFileUploader label, .stNumberInput label {{
@@ -2025,19 +2026,16 @@ if st.button("⚙️ Harmoniser mes fiches", type="primary", disabled=not files)
             try:
                 original_bytes = up.read()
                 out_bytes = process_bytes(
-                    up.read(),
+                    original_bytes,
                     legend_bytes=legend_bytes if config.enable_legend_insertion else None,
                     megaphone_samples=megaphone_samples or None,
                     config=config,
-                    original_bytes,
-                    legend_bytes=legend_bytes,
                     icon_left=icon_left,
                     icon_top=icon_top,
                     legend_left=legend_left,
                     legend_top=legend_top,
                     legend_w=legend_w,
                     legend_h=legend_h,
-                    megaphone_samples=megaphone_samples,
                 )
                 out_name = cleaned_filename(up.name)
                 pdf_name = os.path.splitext(out_name)[0] + ".pdf"
