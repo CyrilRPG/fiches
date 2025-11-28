@@ -738,18 +738,29 @@ def _load_default_megaphone_hashes() -> Set[str]:
     mégaphones à supprimer, sans toucher aux autres icônes de la fiche cible.
     """
     hashes: Set[str] = set()
-    base_dir = os.path.dirname(__file__)
-    candidates = [
-        os.path.join(base_dir, "assets", "Annonce1.png"),
-        os.path.join(base_dir, "assets", "Annonce2.png"),
-    ]
-    for path in candidates:
-        try:
-            with open(path, "rb") as f:
-                hashes.add(_sha1(f.read()))
-        except OSError:
-            # Si le fichier n'existe pas (ex: déploiement différent), on ignore.
-            pass
+    candidates = ["Annonce1.png", "Annonce2.png"]
+    
+    # Essayer plusieurs chemins possibles pour trouver assets
+    possible_paths = []
+    try:
+        possible_paths.append(os.path.dirname(__file__))
+    except:
+        pass
+    possible_paths.extend([os.getcwd(), "."])
+    
+    for base_dir in possible_paths:
+        for filename in candidates:
+            # Essayer avec assets/ devant
+            path1 = os.path.join(base_dir, "assets", filename)
+            # Essayer directement dans le dossier
+            path2 = os.path.join(base_dir, filename)
+            for path in [path1, path2]:
+                try:
+                    if os.path.exists(path):
+                        with open(path, "rb") as f:
+                            hashes.add(_sha1(f.read()))
+                except OSError:
+                    pass
     return hashes
 
 def _load_protected_icon_hashes() -> Set[str]:
@@ -757,17 +768,29 @@ def _load_protected_icon_hashes() -> Set[str]:
     Charge les icônes qui ne doivent JAMAIS être supprimées (ex: Cible.png).
     """
     hashes: Set[str] = set()
-    base_dir = os.path.dirname(__file__)
-    candidates = [
-        os.path.join(base_dir, "assets", "Cible.png"),
-    ]
-    for path in candidates:
-        try:
-            with open(path, "rb") as f:
-                hashes.add(_sha1(f.read()))
-        except OSError:
-            # Si le fichier n'existe pas, on ignore.
-            pass
+    candidates = ["Cible.png"]
+    
+    # Essayer plusieurs chemins possibles pour trouver assets
+    possible_paths = []
+    try:
+        possible_paths.append(os.path.dirname(__file__))
+    except:
+        pass
+    possible_paths.extend([os.getcwd(), "."])
+    
+    for base_dir in possible_paths:
+        for filename in candidates:
+            # Essayer avec assets/ devant
+            path1 = os.path.join(base_dir, "assets", filename)
+            # Essayer directement dans le dossier
+            path2 = os.path.join(base_dir, filename)
+            for path in [path1, path2]:
+                try:
+                    if os.path.exists(path):
+                        with open(path, "rb") as f:
+                            hashes.add(_sha1(f.read()))
+                except OSError:
+                    pass
     return hashes
 
 def _rels_name_for(part_name: str) -> str:
@@ -832,8 +855,8 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
                 drawing = node2; break
             node2 = parent_map.get(node2)
 
-        # Plus d'heuristique de taille/forme ici pour éviter de toucher aux cibles :
-        # on ne supprime que les images reconnues par empreinte.
+        # On ne supprime QUE si l'empreinte correspond exactement à Annonce1/Annonce2
+        # Pas d'heuristique de taille pour éviter de toucher aux cibles
         should_remove = match_hash
 
         if should_remove and drawing is not None:
