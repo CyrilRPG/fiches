@@ -1131,11 +1131,10 @@ def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str
                     media_to_rids[base_name] = set()
                 media_to_rids[base_name].add(rid)
     
-    # Maintenant, supprimer toutes les références dans les parties XML
+    # Maintenant, supprimer toutes les références dans TOUTES les parties XML
+    # On parcourt toutes les parties XML, pas seulement celles dans media_to_rids
     for name, data in list(parts.items()):
         if not name.endswith(".xml"):
-            continue
-        if name not in media_to_rids:
             continue
         
         try:
@@ -1143,9 +1142,14 @@ def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str
         except ET.ParseError:
             continue
         
-        rids_to_remove = media_to_rids[name]
-        if not rids_to_remove:
-            continue
+        # Obtenir les rIds à supprimer pour cette partie (peut être vide)
+        rids_to_remove = media_to_rids.get(name, set())
+        
+        # Construire aussi un set de tous les rIds à supprimer (toutes parties confondues)
+        # pour être sûr de tout attraper
+        all_rids_to_remove = set()
+        for rids in media_to_rids.values():
+            all_rids_to_remove.update(rids)
         
         parent_map = {child: parent for parent in root.iter() for child in parent}
         changed = False
@@ -1153,49 +1157,88 @@ def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str
         # Supprimer les <a:blip r:embed="rId"> et leurs <w:drawing> parents
         for blip in root.findall(".//a:blip", NS):
             rid = blip.get(f"{{{R}}}embed")
-            if rid not in rids_to_remove:
-                continue
-            
-            # Remonter jusqu'à w:drawing
-            node = blip
-            drawing = None
-            while node is not None:
-                if node.tag == f"{{{W}}}drawing":
-                    drawing = node
-                    break
-                node = parent_map.get(node)
-            
-            if drawing is not None:
-                parent = parent_map.get(drawing)
-                if parent is not None:
-                    parent.remove(drawing)
-                    changed = True
+            if rid and (rid in rids_to_remove or rid in all_rids_to_remove):
+                # Remonter jusqu'à w:drawing
+                node = blip
+                drawing = None
+                while node is not None:
+                    if node.tag == f"{{{W}}}drawing":
+                        drawing = node
+                        break
+                    node = parent_map.get(node)
+                
+                if drawing is not None:
+                    # Supprimer le drawing, ou remonter jusqu'au run parent si nécessaire
+                    parent = parent_map.get(drawing)
+                    if parent is not None:
+                        parent.remove(drawing)
+                        changed = True
+                    else:
+                        # Si pas de parent direct, essayer de supprimer le run contenant le drawing
+                        run = None
+                        node2 = drawing
+                        while node2 is not None:
+                            if node2.tag == f"{{{W}}}r":
+                                run = node2
+                                break
+                            node2 = parent_map.get(node2)
+                        if run is not None:
+                            run_parent = parent_map.get(run)
+                            if run_parent is not None:
+                                run_parent.remove(run)
+                                changed = True
         
         # Supprimer les <v:imagedata r:id="rId"> et leurs <w:pict> parents
         for imagedata in root.findall(f".//v:imagedata", NS):
             rid = imagedata.get(f"{{{R}}}id")
-            if rid not in rids_to_remove:
-                continue
+            if rid and (rid in rids_to_remove or rid in all_rids_to_remove):
+                # Remonter jusqu'à w:pict
+                node = imagedata
+                pict = None
+                while node is not None:
+                    if node.tag == f"{{{W}}}pict":
+                        pict = node
+                        break
+                    node = parent_map.get(node)
+                
+                if pict is not None:
+                    parent = parent_map.get(pict)
+                    if parent is not None:
+                        parent.remove(pict)
+                        changed = True
+        
+        # Nettoyer les runs vides après suppression des drawings
+        if changed:
+            # Supprimer les runs qui ne contiennent plus rien
+            for run in root.findall(".//w:r", NS):
+                children = list(run)
+                if not children or all(child.tag == f"{{{W}}}rPr" for child in children):
+                    parent = parent_map.get(run)
+                    if parent is not None:
+                        parent.remove(run)
+                        changed = True
             
-            # Remonter jusqu'à w:pict
-            node = imagedata
-            pict = None
-            while node is not None:
-                if node.tag == f"{{{W}}}pict":
-                    pict = node
-                    break
-                node = parent_map.get(node)
-            
-            if pict is not None:
-                parent = parent_map.get(pict)
-                if parent is not None:
-                    parent.remove(pict)
-                    changed = True
+            # Supprimer les paragraphes vides
+            for para in root.findall(".//w:p", NS):
+                children = list(para)
+                if not children or all(child.tag in (f"{{{W}}}pPr", f"{{{W}}}rPr") for child in children):
+                    # Vérifier qu'il n'y a pas de texte
+                    text_content = "".join(t.text or "" for t in para.findall(".//w:t", NS))
+                    if not text_content.strip():
+                        parent = parent_map.get(para)
+                        if parent is not None and parent.tag != f"{{{W}}}body":
+                            parent.remove(para)
+                            changed = True
         
         if changed:
             parts[name] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
     
-    # Supprimer les relations dans les .rels
+    # Supprimer les relations dans TOUS les .rels
+    # Construire un set global de tous les rIds à supprimer
+    all_rids_to_remove_global = set()
+    for rids in media_to_rids.values():
+        all_rids_to_remove_global.update(rids)
+    
     for name in list(parts.keys()):
         if not name.endswith(".rels"):
             continue
@@ -1210,13 +1253,26 @@ def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str
         base_name = name.replace("/_rels/", "/").replace(".rels", "")
         rids_to_remove = media_to_rids.get(base_name, set())
         
-        if not rids_to_remove:
+        # Utiliser aussi le set global pour être sûr de tout attraper
+        if not rids_to_remove and not all_rids_to_remove_global:
             continue
         
         changed = False
         for rel in list(rels_root.findall(f".//{{{P_REL}}}Relationship")):
             rid = rel.get("Id") or ""
-            if rid in rids_to_remove:
+            tgt = rel.get("Target") or ""
+            
+            # Supprimer si le rId est dans la liste, OU si la cible est un SVG à supprimer
+            should_remove = False
+            if rid in rids_to_remove or rid in all_rids_to_remove_global:
+                should_remove = True
+            elif tgt:
+                # Vérifier si la cible résolue est un SVG à supprimer
+                resolved = _resolve_target_path(base_name, tgt)
+                if resolved in svg_paths_to_remove:
+                    should_remove = True
+            
+            if should_remove:
                 rels_root.remove(rel)
                 changed = True
         
