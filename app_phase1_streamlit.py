@@ -5,7 +5,7 @@ import re
 import os
 import unicodedata
 import hashlib
-from dataclasses import datacl
+from dataclasses import dataclass
 from docx import Document
 from PIL import Image
 import xml.etree.ElementTree as ET
