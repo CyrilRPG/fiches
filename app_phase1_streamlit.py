@@ -5,10 +5,12 @@ import re
 import os
 import unicodedata
 import hashlib
-from dataclasses import dataclass
+from dataclasses import datacl
+from docx import Document
 from PIL import Image
 import xml.etree.ElementTree as ET
 from typing import Dict, Tuple, List, Optional, Set
+from fpdf import FPDF
 import streamlit as st
 
 # ───────────────────────── Espaces de noms ─────────────────────────
@@ -1730,6 +1732,41 @@ def cleaned_filename(original_name: str) -> str:
         ext = ".docx"
     return f"{base}{ext}"
 
+
+# ───────────────────────── DOCX → PDF ──────────────────────────────
+def docx_bytes_to_pdf_bytes(docx_bytes: bytes) -> bytes:
+    """Convertit un DOCX (bytes) en PDF (bytes) de manière légère.
+
+    On s'appuie sur python-docx pour extraire le texte et fpdf2 pour le
+    reposer simplement dans un PDF. La mise en forme est volontairement
+    minimaliste mais garantit un PDF compagnon pour chaque DOCX produit.
+    """
+
+    document = Document(io.BytesIO(docx_bytes))
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    pdf.set_font("Helvetica", size=12)
+
+    line_height = 8
+
+    for paragraph in document.paragraphs:
+        text = paragraph.text.strip()
+        if not text:
+            pdf.ln(line_height / 2)
+            continue
+        pdf.multi_cell(0, line_height, txt=text)
+        pdf.ln(1)
+
+    for table in document.tables:
+        for row in table.rows:
+            cells_text = [normalize_spaces(cell.text) for cell in row.cells]
+            if any(cells_text):
+                pdf.multi_cell(0, line_height, txt=" | ".join(cells_text))
+                pdf.ln(1)
+
+    return pdf.output(dest="S").encode("latin-1")
+
 # ───────────────────────── Interface Streamlit ─────────────────────
 PRIMARY_BLUE = "#1A6DD0"  # Bleu Diploma Santé
 
@@ -1745,12 +1782,21 @@ st.markdown(
             --brand-card: rgba(255, 255, 255, 0.04);
             --brand-border: rgba(255, 255, 255, 0.08);
             --brand-text: #e3ecf7;
-            --brand-subtle: #94a3b8;
+            --brand-subtle: #c7d4e5;
         }}
-        body {{
+        body,
+        .stApp,
+        [data-testid="stAppViewContainer"] {{
             background: var(--brand-bg);
             color: var(--brand-text);
             font-family: 'Inter', 'SF Pro Display', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        }}
+        main .block-container {{
+            background: linear-gradient(180deg, rgba(12, 28, 52, 0.9), rgba(8, 17, 31, 0.92));
+            border-radius: 18px;
+            border: 1px solid var(--brand-border);
+            padding: 1.5rem 1.25rem;
+            box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
         }}
         .diploma-hero {{
             padding: 1.25rem 1.15rem;
@@ -1812,6 +1858,22 @@ st.markdown(
             font-weight: 700;
             background: rgba(255, 255, 255, 0.06);
         }}
+        .stFileUploader [data-testid="stFileUploaderDropzone"] {{
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px dashed var(--brand-border);
+            color: var(--brand-text);
+        }}
+        .stFileUploader [data-testid="stFileUploaderDropzone"] div {{
+            color: var(--brand-subtle);
+        }}
+        .stFileUploader .uploadedFile {{
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid var(--brand-border);
+        }}
+        .stFileUploader .uploadedFileName {{
+            color: var(--brand-text);
+            font-weight: 700;
+        }}
         .stRadio > label, .stFileUploader label, .stNumberInput label {{
             font-weight: 700;
             color: var(--brand-text);
@@ -1828,9 +1890,9 @@ st.markdown(
     """
     <div class="diploma-hero">
         <div class="diploma-chip">🧠 Fiches Diploma</div>
-        <h1 style="margin: 0.25rem 0; font-size: 2rem; color: var(--brand-text);">Harmonisation 2025-2026 en mode sombre</h1>
+        <h1 style="margin: 0.25rem 0; font-size: 2rem; color: var(--brand-text);">Harmonisation 2025-2026</h1>
         <p style="color: var(--brand-subtle); font-size: 1.02rem; max-width: 640px;">
-            Convertis tes fiches en un clic, avec les couleurs Diploma Santé.
+            Convertis tes fiches en un clic.
         </p>
     </div>
     """,
@@ -1952,18 +2014,39 @@ if st.button("⚙️ Harmoniser mes fiches", type="primary", disabled=not files)
         st.warning("Ajoute au moins un fichier .docx")
     else:
         processed: List[Tuple[str, bytes]] = []
+        legend_bytes = default_legend_bytes
+        megaphone_samples = None
+
+        processed: List[Tuple[str, bytes, Optional[bytes], str]] = []
         errors: List[str] = []
+        pdf_errors: List[str] = []
 
         for up in files:
             try:
+                original_bytes = up.read()
                 out_bytes = process_bytes(
                     up.read(),
                     legend_bytes=legend_bytes if config.enable_legend_insertion else None,
                     megaphone_samples=megaphone_samples or None,
                     config=config,
+                    original_bytes,
+                    legend_bytes=legend_bytes,
+                    icon_left=icon_left,
+                    icon_top=icon_top,
+                    legend_left=legend_left,
+                    legend_top=legend_top,
+                    legend_w=legend_w,
+                    legend_h=legend_h,
+                    megaphone_samples=megaphone_samples,
                 )
                 out_name = cleaned_filename(up.name)
-                processed.append((out_name, out_bytes))
+                pdf_name = os.path.splitext(out_name)[0] + ".pdf"
+                pdf_bytes: Optional[bytes] = None
+                try:
+                    pdf_bytes = docx_bytes_to_pdf_bytes(out_bytes)
+                except Exception as conv_err:
+                    pdf_errors.append(f"{out_name} : {conv_err}")
+                processed.append((out_name, out_bytes, pdf_bytes, pdf_name))
                 st.success(f"✅ Terminé : {up.name} → {out_name}")
             except Exception as e:
                 errors.append(f"{up.name} : {e}")
@@ -1974,8 +2057,10 @@ if st.button("⚙️ Harmoniser mes fiches", type="primary", disabled=not files)
         if processed:
             zip_buf = io.BytesIO()
             with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
-                for fname, fbytes in processed:
+                for fname, fbytes, pdf_bytes, pdf_name in processed:
                     z.writestr(fname, fbytes)
+                    if pdf_bytes:
+                        z.writestr(pdf_name, pdf_bytes)
             zip_buf.seek(0)
             st.download_button(
                 "⬇️ Télécharger le ZIP de tous les fichiers modifiés",
@@ -1983,3 +2068,5 @@ if st.button("⚙️ Harmoniser mes fiches", type="primary", disabled=not files)
                 file_name="fiches_modifiees.zip",
                 mime="application/zip",
             )
+            if pdf_errors:
+                st.warning("PDF non générés pour certains fichiers :\n- " + "\n- ".join(pdf_errors))
