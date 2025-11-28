@@ -1771,7 +1771,10 @@ def docx_bytes_to_pdf_bytes(docx_bytes: bytes) -> bytes:
                 pdf.multi_cell(0, line_height, txt=" | ".join(cells_text))
                 pdf.ln(1)
 
-    return pdf.output(dest="S").encode("latin-1")
+    pdf_data = pdf.output(dest="S")
+    if isinstance(pdf_data, str):
+        return pdf_data.encode("latin-1")
+    return bytes(pdf_data)
 
 # ───────────────────────── Interface Streamlit ─────────────────────
 PRIMARY_BLUE = "#1A6DD0"  # Bleu Diploma Santé
