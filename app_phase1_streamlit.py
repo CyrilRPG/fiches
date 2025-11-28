@@ -5,9 +5,11 @@ import re
 import os
 import unicodedata
 import hashlib
+from docx import Document
 from PIL import Image
 import xml.etree.ElementTree as ET
 from typing import Dict, Tuple, List, Optional, Set
+from fpdf import FPDF
 import streamlit as st
 
 # ───────────────────────── Espaces de noms ─────────────────────────
@@ -1676,6 +1678,41 @@ def cleaned_filename(original_name: str) -> str:
         ext = ".docx"
     return f"{base}{ext}"
 
+
+# ───────────────────────── DOCX → PDF ──────────────────────────────
+def docx_bytes_to_pdf_bytes(docx_bytes: bytes) -> bytes:
+    """Convertit un DOCX (bytes) en PDF (bytes) de manière légère.
+
+    On s'appuie sur python-docx pour extraire le texte et fpdf2 pour le
+    reposer simplement dans un PDF. La mise en forme est volontairement
+    minimaliste mais garantit un PDF compagnon pour chaque DOCX produit.
+    """
+
+    document = Document(io.BytesIO(docx_bytes))
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    pdf.set_font("Helvetica", size=12)
+
+    line_height = 8
+
+    for paragraph in document.paragraphs:
+        text = paragraph.text.strip()
+        if not text:
+            pdf.ln(line_height / 2)
+            continue
+        pdf.multi_cell(0, line_height, txt=text)
+        pdf.ln(1)
+
+    for table in document.tables:
+        for row in table.rows:
+            cells_text = [normalize_spaces(cell.text) for cell in row.cells]
+            if any(cells_text):
+                pdf.multi_cell(0, line_height, txt=" | ".join(cells_text))
+                pdf.ln(1)
+
+    return pdf.output(dest="S").encode("latin-1")
+
 # ───────────────────────── Interface Streamlit ─────────────────────
 PRIMARY_BLUE = "#1A6DD0"  # Bleu Diploma Santé
 
@@ -1842,13 +1879,15 @@ if st.button("⚙️ Harmoniser mes fiches", type="primary", disabled=not files)
         legend_bytes = legend_file.read() if legend_file else default_legend_bytes
         megaphone_samples = [f.read() for f in megaphone_files] if megaphone_files else None
 
-        processed: List[Tuple[str, bytes]] = []
+        processed: List[Tuple[str, bytes, Optional[bytes], str]] = []
         errors: List[str] = []
+        pdf_errors: List[str] = []
 
         for up in files:
             try:
+                original_bytes = up.read()
                 out_bytes = process_bytes(
-                    up.read(),
+                    original_bytes,
                     legend_bytes=legend_bytes,
                     icon_left=icon_left,
                     icon_top=icon_top,
@@ -1859,7 +1898,13 @@ if st.button("⚙️ Harmoniser mes fiches", type="primary", disabled=not files)
                     megaphone_samples=megaphone_samples,
                 )
                 out_name = cleaned_filename(up.name)
-                processed.append((out_name, out_bytes))
+                pdf_name = os.path.splitext(out_name)[0] + ".pdf"
+                pdf_bytes: Optional[bytes] = None
+                try:
+                    pdf_bytes = docx_bytes_to_pdf_bytes(out_bytes)
+                except Exception as conv_err:
+                    pdf_errors.append(f"{out_name} : {conv_err}")
+                processed.append((out_name, out_bytes, pdf_bytes, pdf_name))
                 st.success(f"✅ Terminé : {up.name} → {out_name}")
             except Exception as e:
                 errors.append(f"{up.name} : {e}")
@@ -1870,8 +1915,10 @@ if st.button("⚙️ Harmoniser mes fiches", type="primary", disabled=not files)
         if processed:
             zip_buf = io.BytesIO()
             with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
-                for fname, fbytes in processed:
+                for fname, fbytes, pdf_bytes, pdf_name in processed:
                     z.writestr(fname, fbytes)
+                    if pdf_bytes:
+                        z.writestr(pdf_name, pdf_bytes)
             zip_buf.seek(0)
             st.download_button(
                 "⬇️ Télécharger le ZIP de tous les fichiers modifiés",
@@ -1879,3 +1926,5 @@ if st.button("⚙️ Harmoniser mes fiches", type="primary", disabled=not files)
                 file_name="fiches_modifiees.zip",
                 mime="application/zip",
             )
+            if pdf_errors:
+                st.warning("PDF non générés pour certains fichiers :\n- " + "\n- ".join(pdf_errors))
