@@ -946,35 +946,19 @@ def _load_cible_svg_model() -> Optional[bytes]:
 
 def _identify_svg_to_remove(parts: Dict[str, bytes]) -> Set[str]:
     """
-    Parcourt TOUS les fichiers word/media/*.svg et identifie ceux à supprimer.
-    Règle simplifiée et robuste basée sur les IDs internes des icônes :
-      - SVG contenant \"Icons_Bullseye\"  => CIBLE, à garder
-      - SVG contenant \"Icons_Megaphone\" => ANNONCE, à supprimer
-      - tout autre SVG                   => à supprimer
+    Identifie les SVG à supprimer en comparant avec assets/annonce.svg.
+    Seuls les SVG correspondant exactement à annonce.svg sont identifiés pour suppression.
+    Tous les autres SVG (cibles, autres) sont conservés.
     """
-    svg_to_remove: Set[str] = set()
-
-    # Parcourir tous les SVG dans word/media/
-    for name, data in parts.items():
-        lname = name.lower()
-        if not lname.startswith("word/"):
-            continue
-        if "/media/" not in lname:
-            continue
-        if not lname.endswith(".svg"):
-            continue
-
-        # Heuristique basée sur l'attribut id vu dans les SVG Word :
-        #   - id=\"Icons_Bullseye\"  => cible à préserver
-        #   - id=\"Icons_Megaphone\" => annonce à supprimer
-        data_lower = data.lower()
-        if b'icons_bullseye' in data_lower:
-            # Cible : on la garde
-            continue
-        # Tout le reste (dont icons_megaphone*) est à supprimer
-        svg_to_remove.add(name)
+    # Charger le modèle annonce.svg depuis assets/
+    svg_model_bytes = _load_svg_model_bytes()
+    if not svg_model_bytes:
+        # Si on ne trouve pas annonce.svg, on ne supprime rien (sécurité)
+        return set()
     
-    return svg_to_remove
+    # Utiliser _find_matching_svg_media pour trouver les SVG correspondant exactement
+    # à annonce.svg via le fragment ANNONCE_SVG_SNIP
+    return _find_matching_svg_media(parts, svg_model_bytes)
 
 def _find_matching_svg_media(parts: Dict[str, bytes], svg_model: bytes) -> Set[str]:
     """
@@ -1087,6 +1071,115 @@ def _resolve_target_path(base_part: str, target: str) -> str:
     norm = os.path.normpath(os.path.join(base_dir, target))
     return norm.replace("\\", "/")
 
+def remove_drawing_for_rid(parts: Dict[str, bytes], rid_to_remove: str) -> None:
+    """
+    Supprime toutes les références à un rId donné dans toutes les parties XML.
+    Cela inclut les runs, drawings, inline, anchor, etc.
+    """
+    if not rid_to_remove:
+        return
+    
+    # Parcourir toutes les parties XML
+    for name, data in list(parts.items()):
+        if not name.endswith(".xml"):
+            continue
+        
+        try:
+            root = ET.fromstring(data)
+        except ET.ParseError:
+            continue
+        
+        parent_map = {child: parent for parent in root.iter() for child in parent}
+        changed = False
+        
+        # 1. Supprimer tous les <a:blip r:embed="rId">
+        for blip in list(root.findall(".//a:blip", NS)):
+            rid = blip.get(f"{{{R}}}embed")
+            if rid != rid_to_remove:
+                continue
+            
+            # Remonter jusqu'à trouver le run, drawing, inline ou anchor parent
+            node = blip
+            to_remove = None
+            
+            # Chercher d'abord w:drawing
+            while node is not None:
+                if node.tag == f"{{{W}}}drawing":
+                    to_remove = node
+                    break
+                node = parent_map.get(node)
+            
+            # Si pas de drawing, chercher wp:inline ou wp:anchor
+            if to_remove is None:
+                node = blip
+                while node is not None:
+                    if node.tag in (f"{{{WP}}}inline", f"{{{WP}}}anchor"):
+                        to_remove = node
+                        break
+                    node = parent_map.get(node)
+            
+            # Si toujours rien, chercher w:r (run)
+            if to_remove is None:
+                node = blip
+                while node is not None:
+                    if node.tag == f"{{{W}}}r":
+                        to_remove = node
+                        break
+                    node = parent_map.get(node)
+            
+            # Supprimer l'élément trouvé
+            if to_remove is not None:
+                parent = parent_map.get(to_remove)
+                if parent is not None:
+                    parent.remove(to_remove)
+                    changed = True
+        
+        # 2. Supprimer tous les <v:imagedata r:id="rId">
+        for imagedata in list(root.findall(f".//v:imagedata", NS)):
+            rid = imagedata.get(f"{{{R}}}id")
+            if rid != rid_to_remove:
+                continue
+            
+            # Remonter jusqu'à w:pict
+            node = imagedata
+            pict = None
+            while node is not None:
+                if node.tag == f"{{{W}}}pict":
+                    pict = node
+                    break
+                node = parent_map.get(node)
+            
+            if pict is not None:
+                parent = parent_map.get(pict)
+                if parent is not None:
+                    parent.remove(pict)
+                    changed = True
+        
+        # 3. Nettoyer les runs vides après suppression
+        if changed:
+            # Supprimer les runs qui ne contiennent plus rien
+            for run in list(root.findall(".//w:r", NS)):
+                children = list(run)
+                if not children or all(child.tag == f"{{{W}}}rPr" for child in children):
+                    parent = parent_map.get(run)
+                    if parent is not None:
+                        parent.remove(run)
+                        changed = True
+            
+            # Supprimer les paragraphes vides
+            for para in list(root.findall(".//w:p", NS)):
+                children = list(para)
+                if not children or all(child.tag in (f"{{{W}}}pPr", f"{{{W}}}rPr") for child in children):
+                    text_content = "".join(t.text or "" for t in para.findall(".//w:t", NS))
+                    if not text_content.strip():
+                        parent = parent_map.get(para)
+                        if parent is not None and parent.tag != f"{{{W}}}body":
+                            parent.remove(para)
+                            changed = True
+        
+        if changed:
+            parts[name] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
 def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str]) -> None:
     """
     Supprime toutes les références aux SVG identifiés dans toutes les parties du document.
@@ -1131,113 +1224,18 @@ def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str
                     media_to_rids[base_name] = set()
                 media_to_rids[base_name].add(rid)
     
-    # Maintenant, supprimer toutes les références dans TOUTES les parties XML
-    # On parcourt toutes les parties XML, pas seulement celles dans media_to_rids
-    for name, data in list(parts.items()):
-        if not name.endswith(".xml"):
-            continue
-        
-        try:
-            root = ET.fromstring(data)
-        except ET.ParseError:
-            continue
-        
-        # Obtenir les rIds à supprimer pour cette partie (peut être vide)
-        rids_to_remove = media_to_rids.get(name, set())
-        
-        # Construire aussi un set de tous les rIds à supprimer (toutes parties confondues)
-        # pour être sûr de tout attraper
-        all_rids_to_remove = set()
-        for rids in media_to_rids.values():
-            all_rids_to_remove.update(rids)
-        
-        parent_map = {child: parent for parent in root.iter() for child in parent}
-        changed = False
-        
-        # Supprimer les <a:blip r:embed="rId"> et leurs <w:drawing> parents
-        for blip in root.findall(".//a:blip", NS):
-            rid = blip.get(f"{{{R}}}embed")
-            if rid and (rid in rids_to_remove or rid in all_rids_to_remove):
-                # Remonter jusqu'à w:drawing
-                node = blip
-                drawing = None
-                while node is not None:
-                    if node.tag == f"{{{W}}}drawing":
-                        drawing = node
-                        break
-                    node = parent_map.get(node)
-                
-                if drawing is not None:
-                    # Supprimer le drawing, ou remonter jusqu'au run parent si nécessaire
-                    parent = parent_map.get(drawing)
-                    if parent is not None:
-                        parent.remove(drawing)
-                        changed = True
-                    else:
-                        # Si pas de parent direct, essayer de supprimer le run contenant le drawing
-                        run = None
-                        node2 = drawing
-                        while node2 is not None:
-                            if node2.tag == f"{{{W}}}r":
-                                run = node2
-                                break
-                            node2 = parent_map.get(node2)
-                        if run is not None:
-                            run_parent = parent_map.get(run)
-                            if run_parent is not None:
-                                run_parent.remove(run)
-                                changed = True
-        
-        # Supprimer les <v:imagedata r:id="rId"> et leurs <w:pict> parents
-        for imagedata in root.findall(f".//v:imagedata", NS):
-            rid = imagedata.get(f"{{{R}}}id")
-            if rid and (rid in rids_to_remove or rid in all_rids_to_remove):
-                # Remonter jusqu'à w:pict
-                node = imagedata
-                pict = None
-                while node is not None:
-                    if node.tag == f"{{{W}}}pict":
-                        pict = node
-                        break
-                    node = parent_map.get(node)
-                
-                if pict is not None:
-                    parent = parent_map.get(pict)
-                    if parent is not None:
-                        parent.remove(pict)
-                        changed = True
-        
-        # Nettoyer les runs vides après suppression des drawings
-        if changed:
-            # Supprimer les runs qui ne contiennent plus rien
-            for run in root.findall(".//w:r", NS):
-                children = list(run)
-                if not children or all(child.tag == f"{{{W}}}rPr" for child in children):
-                    parent = parent_map.get(run)
-                    if parent is not None:
-                        parent.remove(run)
-                        changed = True
-            
-            # Supprimer les paragraphes vides
-            for para in root.findall(".//w:p", NS):
-                children = list(para)
-                if not children or all(child.tag in (f"{{{W}}}pPr", f"{{{W}}}rPr") for child in children):
-                    # Vérifier qu'il n'y a pas de texte
-                    text_content = "".join(t.text or "" for t in para.findall(".//w:t", NS))
-                    if not text_content.strip():
-                        parent = parent_map.get(para)
-                        if parent is not None and parent.tag != f"{{{W}}}body":
-                            parent.remove(para)
-                            changed = True
-        
-        if changed:
-            parts[name] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+    # Construire un set global de tous les rIds à supprimer (toutes parties confondues)
+    all_rids_to_remove = set()
+    for rids in media_to_rids.values():
+        all_rids_to_remove.update(rids)
+    
+    # Utiliser la fonction dédiée pour supprimer toutes les références à chaque rId
+    # Cela garantit qu'aucune référence visuelle ne reste (runs, drawings, inline, anchor, etc.)
+    # et évite l'affichage du carré rouge d'image manquante dans Word
+    for rid in all_rids_to_remove:
+        remove_drawing_for_rid(parts, rid)
     
     # Supprimer les relations dans TOUS les .rels
-    # Construire un set global de tous les rIds à supprimer
-    all_rids_to_remove_global = set()
-    for rids in media_to_rids.values():
-        all_rids_to_remove_global.update(rids)
     
     for name in list(parts.keys()):
         if not name.endswith(".rels"):
@@ -1254,7 +1252,7 @@ def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str
         rids_to_remove = media_to_rids.get(base_name, set())
         
         # Utiliser aussi le set global pour être sûr de tout attraper
-        if not rids_to_remove and not all_rids_to_remove_global:
+        if not rids_to_remove and not all_rids_to_remove:
             continue
         
         changed = False
@@ -1264,7 +1262,7 @@ def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str
             
             # Supprimer si le rId est dans la liste, OU si la cible est un SVG à supprimer
             should_remove = False
-            if rid in rids_to_remove or rid in all_rids_to_remove_global:
+            if rid in rids_to_remove or rid in all_rids_to_remove:
                 should_remove = True
             elif tgt:
                 # Vérifier si la cible résolue est un SVG à supprimer
