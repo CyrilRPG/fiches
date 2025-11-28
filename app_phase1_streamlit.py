@@ -106,10 +106,9 @@ def replace_years(root):
             continue
         txt = "".join(t.text or "" for t in wts)
         new = YEAR_PAT.sub(REPL, txt)
-        # Si le texte commence par "2025 - 2026" suivi immédiatement de lettres
-        # (ex: "2025 - 2026UNIVERSITÉ ..."), on réduit à "2025 - 2026" seul.
-        if re.match(rf"^\s*{re.escape(REPL)}\s*[A-Za-zÀ-ÿ]", new):
-            new = REPL
+        # Si le motif '2025 - 2026' est immédiatement suivi de lettres (UN, UNI, UNIVERSITE...),
+        # on supprime ces lettres pour garder uniquement '2025 - 2026'.
+        new = re.sub(rf"{re.escape(REPL)}([A-ZÀ-Ý]+)", REPL, new)
         if new != txt:
             redistribute(wts, new)
     for tx in root.findall(".//a:txBody", NS):
@@ -118,8 +117,7 @@ def replace_years(root):
             continue
         txt = "".join(t.text or "" for t in ats)
         new = YEAR_PAT.sub(REPL, txt)
-        if re.match(rf"^\s*{re.escape(REPL)}\s*[A-Za-zÀ-ÿ]", new):
-            new = REPL
+        new = re.sub(rf"{re.escape(REPL)}([A-ZÀ-Ý]+)", REPL, new)
         if new != txt:
             redistribute(ats, new)
 
@@ -831,27 +829,28 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
                 drawing = node2; break
             node2 = parent_map.get(node2)
 
-        # Heuristique de secours : petites icônes très légères (mégaphones),
-        # pour le cas où Word ré-encode les images et change légèrement les octets.
-        is_tiny_square = False
+        # Heuristique de forme : les mégaphones sont généralement plus larges que hauts,
+        # alors que les cibles sont plutôt carrées.
+        is_megaphone_shape = False
         if holder is not None:
             extent = holder.find("wp:extent", NS)
             if extent is not None:
                 try:
                     cx = int(extent.get("cx", "0")); cy = int(extent.get("cy", "0"))
                     wcm = emu_to_cm(cx); hcm = emu_to_cm(cy)
-                    # Vrais petits pictos ~1 cm, à peu près carrés
-                    if wcm <= 1.3 and hcm <= 1.3 and 0.7 <= (wcm / hcm if hcm else 1) <= 1.3:
-                        is_tiny_square = True
+                    aspect = (wcm / hcm) if hcm else 1.0
+                    # Petits pictos rectangulaires horizontaux ~ mégaphones
+                    if wcm <= 2.5 and hcm <= 1.5 and aspect >= 1.5:
+                        is_megaphone_shape = True
                 except Exception:
-                    is_tiny_square = False
+                    is_megaphone_shape = False
 
         is_very_light = len(data) <= 30 * 1024  # <= 30 Ko
 
-        # On supprime soit les images dont l'empreinte est connue,
-        # soit les très petits pictos carrés et légers (mégaphones),
-        # ce qui laisse intactes les autres icônes plus grandes (ex: icône écriture).
-        should_remove = match_hash or (is_tiny_square and is_very_light)
+        # On supprime soit les images dont l'empreinte est connue (Annonce1/2 ou échantillons),
+        # soit les petits pictos rectangulaires légers qui ressemblent à un mégaphone.
+        # Les cibles carrées sont ainsi préservées.
+        should_remove = match_hash or (is_megaphone_shape and is_very_light)
 
         if should_remove and drawing is not None:
             parent = parent_map.get(drawing)
