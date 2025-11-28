@@ -34,6 +34,10 @@ YEAR_PAT = re.compile(
 # Remplacement standardisé
 REPL = "2025 - 2026"
 
+# Fragments de chemin SVG caractéristiques pour différencier Annonce / Cible
+ANNONCE_SVG_SNIP = b"M1.98047 8.62184C1.88751 8.46071"
+CIBLE_SVG_SNIP   = b"M12.2656 2.73438 12.1094 1.32812"
+
 ROMAN_TITLE_RE = re.compile(r"^\s*[IVXLC]+\s*[.)]?\s+.+", re.IGNORECASE)
 
 # ───────────────────────── Utils ───────────────────────────────────
@@ -864,19 +868,15 @@ def _normalize_svg(svg_bytes: bytes) -> Optional[bytes]:
 
 def _find_matching_svg_media(parts: Dict[str, bytes], svg_model: bytes) -> Set[str]:
     """
-    Retourne l'ensemble des chemins 'word/media/*.svg' dont le contenu
-    est identique au SVG modèle fourni (comparaison normalisée).
+    Retourne l'ensemble des chemins 'word/media/*.svg' correspondant
+    au SVG d'annonce à supprimer. On utilise ici un fragment de chemin
+    très spécifique (ANNONCE_SVG_SNIP) pour être robuste aux
+    changements de formatage XML.
     """
     matches: Set[str] = set()
     if not svg_model:
         return matches
-    
-    # Normaliser le modèle une fois
-    normalized_model = _normalize_svg(svg_model)
-    if normalized_model is None:
-        # Si le modèle n'est pas un SVG valide, essayer comparaison exacte
-        normalized_model = svg_model
-    
+
     for name, data in parts.items():
         lname = name.lower()
         if not lname.startswith("word/"):
@@ -885,15 +885,10 @@ def _find_matching_svg_media(parts: Dict[str, bytes], svg_model: bytes) -> Set[s
             continue
         if not lname.endswith(".svg"):
             continue
-        
-        # Normaliser le SVG du document
-        normalized_data = _normalize_svg(data)
-        if normalized_data is None:
-            # Si ce n'est pas un SVG valide, essayer comparaison exacte
-            normalized_data = data
-        
-        # Comparer les versions normalisées
-        if normalized_data == normalized_model:
+
+        # Détection simple par fragment de chemin : si le SVG contient
+        # la trace caractéristique d'Annonce, on le marque pour suppression.
+        if ANNONCE_SVG_SNIP in data:
             matches.add(name)
     return matches
 
@@ -1075,31 +1070,6 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
     parent_map = {child: parent for parent in root.iter() for child in parent}
     removed_rids: Set[str] = set()
 
-    # Charger le modèle SVG à PRÉSERVER (cible), tous les autres SVG seront supprimés
-    cible_svg_model = None
-    cible_svg_normalized = None
-    possible_paths = []
-    try:
-        possible_paths.append(os.path.dirname(__file__))
-    except:
-        pass
-    possible_paths.extend([os.getcwd(), "."])
-    for base in possible_paths:
-        for fname in ["cible.svg", "Cible.svg"]:
-            p1 = os.path.join(base, "assets", fname)
-            p2 = os.path.join(base, fname)
-            for path in (p1, p2):
-                try:
-                    if os.path.exists(path):
-                        with open(path, "rb") as f:
-                            cible_svg_model = f.read()
-                            cible_svg_normalized = _normalize_svg(cible_svg_model)
-                            break
-                except OSError:
-                    continue
-        if cible_svg_model:
-            break
-
     # 1) Images DrawingML : <a:blip r:embed="...">
     for blip in root.findall(".//a:blip", NS):
         rid = blip.get(f"{{{R}}}embed")
@@ -1115,18 +1085,15 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
         data_normalized = None
         svg_should_remove = False
 
-        # Pour les SVG, utiliser la comparaison normalisée :
-        #   - si la signature correspond à Cible.svg -> on garde
-        #   - sinon -> on supprime
+        # Règle simple pour les SVG :
+        #   - si le contenu contient le fragment caractéristique de Cible.svg -> on garde
+        #   - sinon -> on supprime (Annonce ou autre SVG)
         if is_svg:
-            data_normalized = _normalize_svg(data)
-            if data_normalized and cible_svg_normalized:
-                if data_normalized == cible_svg_normalized:
-                    # Cible : on la préserve absolument
-                    continue
-                else:
-                    # Tout autre SVG doit être supprimé
-                    svg_should_remove = True
+            if CIBLE_SVG_SNIP in data:
+                # Cible : on la préserve absolument
+                continue
+            else:
+                svg_should_remove = True
         
         data_hash = _sha1(data)
         data_ah = _ahash(data)
