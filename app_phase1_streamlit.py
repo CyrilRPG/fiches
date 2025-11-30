@@ -670,6 +670,40 @@ def remove_legend_text(document_xml: bytes) -> bytes:
                 t.text = ""
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
+
+def remove_legend_cible_icons(root: ET.Element):
+    """Supprime uniquement l'icône Cible située dans la légende de couverture.
+
+    Le visuel concerné est systématiquement suivi du texte "Notion déjà tombée au concours".
+    On laisse intactes les autres occurrences de l'icône dans le reste du document.
+    """
+
+    target_norm = _norm_matchable("Notion déjà tombée au concours")
+    parent_map = {child: parent for parent in root.iter() for child in parent}
+
+    for p in root.findall(".//w:p", NS):
+        if target_norm not in _norm_matchable(get_text(p)):
+            continue
+
+        # Supprimer les drawings (inline/anchor) et pict éventuels situés dans ce paragraphe.
+        for drawing in list(p.findall(".//w:drawing", NS)):
+            parent = parent_map.get(drawing)
+            if parent is not None:
+                parent.remove(drawing)
+                # Nettoyer le run porteur si vide après suppression
+                if parent.tag == f"{{{W}}}r":
+                    children = list(parent)
+                    if not [ch for ch in children if ch.tag != f"{{{W}}}rPr"]:
+                        run_parent = parent_map.get(parent)
+                        if run_parent is not None:
+                            run_parent.remove(parent)
+
+        for pict in list(p.findall(".//w:pict", NS)):
+            parent = parent_map.get(pict)
+            if parent is not None:
+                parent.remove(pict)
+
+
 def insert_legend_image(
     document_xml: bytes, rels_xml: bytes, image_bytes: bytes,
     left_cm=2.3, top_cm=23.8, width_cm=5.68, height_cm=3.77,
@@ -1300,6 +1334,14 @@ def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str
         
         # Nettoyer les runs vides après suppression des drawings
         if changed:
+            def _in_textbox(node: ET.Element) -> bool:
+                cur = node
+                while cur is not None:
+                    if cur.tag == f"{{{W}}}txbxContent":
+                        return True
+                    cur = parent_map.get(cur)
+                return False
+
             # Supprimer les runs qui ne contiennent plus rien
             for run in root.findall(".//w:r", NS):
                 children = list(run)
@@ -1315,7 +1357,7 @@ def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str
                 if not children or all(child.tag in (f"{{{W}}}pPr", f"{{{W}}}rPr") for child in children):
                     # Vérifier qu'il n'y a pas de texte
                     text_content = "".join(t.text or "" for t in para.findall(".//w:t", NS))
-                    if not text_content.strip():
+                    if not text_content.strip() and not _in_textbox(para):
                         parent = parent_map.get(para)
                         if parent is not None and parent.tag != f"{{{W}}}body":
                             parent.remove(para)
@@ -1670,6 +1712,7 @@ def process_bytes(
                 tune_cover_shapes_spatial(root, cfg)
                 force_course_name_after_title_20(root, cfg)
                 force_title_fiche_de_cours_22(root, cfg)
+            remove_legend_cible_icons(root)
             if cfg.enable_tables_formatting:
                 tables_and_numbering(root, cfg)
             reposition_small_icon(root, cfg.icon_left, cfg.icon_top)
