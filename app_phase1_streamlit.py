@@ -147,17 +147,25 @@ def _hex_to_rgb(h: str) -> Optional[Tuple[int, int, int]]:
         return None
     return int(h[0:2],16), int(h[2:4],16), int(h[4:6],16)
 
+RED_HEX = {
+    "FF0000","C00000","CC0000","E60000","ED1C24","F44336","DC143C","B22222","E74C3C","D0021B"
+}
+BLUE_HEX = {
+    "0000FF","0070C0","2E74B5","1F497D","2F5496","4F81BD","5B9BD5","1F4E79","0F4C81","1E90FF","3399FF","3C78D8"
+}
+
+
+def _looks_red(rgb: Tuple[int, int, int]) -> bool:
+    r, g, b = rgb
+    return (r >= 170 and g <= 110 and b <= 110)
+
+
+def _looks_blue(rgb: Tuple[int, int, int]) -> bool:
+    r, g, b = rgb
+    return (b >= 170 and r <= 110 and g <= 140)
+
+
 def red_to_black(root):
-    RED_HEX = {
-        "FF0000","C00000","CC0000","E60000","ED1C24","F44336","DC143C","B22222","E74C3C","D0021B"
-    }
-    BLUE_HEX = {
-        "0000FF","0070C0","2E74B5","1F497D","2F5496","4F81BD","5B9BD5","1F4E79","0F4C81","1E90FF","3399FF","3C78D8"
-    }
-    def looks_red(rgb: Tuple[int,int,int]) -> bool:
-        r,g,b = rgb; return (r >= 170 and g <= 110 and b <= 110)
-    def looks_blue(rgb: Tuple[int,int,int]) -> bool:
-        r,g,b = rgb; return (b >= 170 and r <= 110 and g <= 140)
 
     for run in root.findall(".//w:r", NS):
         rPr = run.find("w:rPr", NS)
@@ -176,7 +184,7 @@ def red_to_black(root):
                 make_black = True
             else:
                 rgb = _hex_to_rgb(val)
-                if rgb and (looks_red(rgb) or looks_blue(rgb)):
+                if rgb and (_looks_red(rgb) or _looks_blue(rgb)):
                     make_black = True
         if make_black:
             c.set(f"{{{W}}}val", "000000")
@@ -184,19 +192,15 @@ def red_to_black(root):
                 c.attrib.pop(f"{{{W}}}{a}", None)
 
 def force_red_bullets_black_in_numbering(root):
-    RED_HEX = {"FF0000","C00000","CC0000","E60000","ED1C24","F44336","DC143C","B22222","E74C3C","D0021B"}
-    def looks_red(rgb: Tuple[int,int,int]) -> bool:
-        if not rgb: return False
-        r,g,b = rgb; return (r >= 170 and g <= 110 and b <= 110)
     for col in root.findall(".//w:lvl//w:rPr/w:color", NS):
         val = (col.get(f"{{{W}}}val") or "").strip().upper()
         make_black = False
         if re.fullmatch(r"[0-9A-F]{6}", val or ""):
-            if val in RED_HEX:
+            if val in RED_HEX or val in BLUE_HEX:
                 make_black = True
             else:
                 rgb = _hex_to_rgb(val)
-                if rgb and looks_red(rgb):
+                if rgb and (_looks_red(rgb) or _looks_blue(rgb)):
                     make_black = True
         if make_black:
             col.set(f"{{{W}}}val", "000000")
@@ -205,10 +209,6 @@ def force_red_bullets_black_in_numbering(root):
 
 def force_red_bullets_black_in_styles(root):
     CANDIDATES = {"list","bullet","puce","puces","liste"}
-    RED_HEX = {"FF0000","C00000","CC0000","E60000","ED1C24","F44336","DC143C","B22222","E74C3C","D0021B"}
-    def looks_red(rgb: Tuple[int,int,int]) -> bool:
-        if not rgb: return False
-        r,g,b = rgb; return (r >= 170 and g <= 110 and b <= 110)
     for st in root.findall(".//w:style[@w:type='paragraph']", NS):
         name_el = st.find("w:name", NS)
         style_id = (st.get(f"{{{W}}}styleId") or "").lower()
@@ -222,11 +222,11 @@ def force_red_bullets_black_in_styles(root):
         val = (col.get(f"{{{W}}}val") or "").strip().upper()
         make_black = False
         if re.fullmatch(r"[0-9A-F]{6}", val or ""):
-            if val in RED_HEX:
+            if val in RED_HEX or val in BLUE_HEX:
                 make_black = True
             else:
                 rgb = _hex_to_rgb(val)
-                if rgb and looks_red(rgb):
+                if rgb and (_looks_red(rgb) or _looks_blue(rgb)):
                     make_black = True
         if make_black:
             col.set(f"{{{W}}}val", "000000")
@@ -234,10 +234,6 @@ def force_red_bullets_black_in_styles(root):
                 col.attrib.pop(f"{{{W}}}{a}", None)
 
 def force_red_bullets_black_in_paragraphs(root):
-    RED_HEX = {"FF0000","C00000","CC0000","E60000","ED1C24","F44336","DC143C","B22222","E74C3C","D0021B"}
-    def looks_red(rgb: Tuple[int,int,int]) -> bool:
-        if not rgb: return False
-        r,g,b = rgb; return (r >= 170 and g <= 110 and b <= 110)
     for p in root.findall(".//w:p", NS):
         pPr = p.find("w:pPr", NS)
         if pPr is None or pPr.find("w:numPr", NS) is None:
@@ -251,11 +247,11 @@ def force_red_bullets_black_in_paragraphs(root):
         val = (col.get(f"{{{W}}}val") or "").strip().upper()
         make_black = False
         if re.fullmatch(r"[0-9A-F]{6}", val or ""):
-            if val in RED_HEX:
+            if val in RED_HEX or val in BLUE_HEX:
                 make_black = True
             else:
                 rgb = _hex_to_rgb(val)
-                if rgb and looks_red(rgb):
+                if rgb and (_looks_red(rgb) or _looks_blue(rgb)):
                     make_black = True
         if make_black:
             col.set(f"{{{W}}}val", "000000")
@@ -274,10 +270,10 @@ def holder_pos_cm(holder) -> Tuple[float, float]:
 def get_tx_text(holder) -> str:
     tx = holder.find(".//a:txBody", NS)
     if tx is not None:
-        return "".join(t.text or "" for t in tx.findall(".//a:t", NS)).strip()
+        return "".join(t.text or "" for t in tx.findall(".//a:t", NS))
     txbx = holder.find(".//wps:txbx/w:txbxContent", NS)
     if txbx is not None:
-        return "".join(t.text or "" for t in txbx.findall(".//w:t", NS)).strip()
+        return "".join(t.text or "" for t in txbx.findall(".//w:t", NS))
     return ""
 
 def set_tx_size(holder, pt: float):
@@ -338,23 +334,24 @@ def cover_sizes_cleanup(root, config):
 def tune_cover_shapes_spatial(root, config):
     holders = []
     for holder in root.findall(".//wp:anchor", NS) + root.findall(".//wp:inline", NS):
-        txt = get_tx_text(holder)
+        raw_txt = get_tx_text(holder)
+        txt = raw_txt.strip()
         if not txt:
             continue
         x, y = holder_pos_cm(holder)
-        holders.append((y, x, holder, txt))
+        holders.append((y, x, holder, raw_txt))
     if not holders:
         return
     holders.sort(key=lambda t: (t[0], t[1]))
     # Bloc université + année en 10 pt et remplacer l'année
     for _, _, h, txt in holders:
-        low = txt.lower()
+        low = txt.strip().lower()
         if ("universite" in low or "université" in low):
             set_tx_size(h, config.university_year_size)
     # Fiche de cours + matière + nom du cours
     idx_fiche = None
     for i, (_, _, h, txt) in enumerate(holders):
-        if "fiche de cours" in txt.lower():
+        if "fiche de cours" in txt.strip().lower():
             # Titre "Fiche de cours" en 20 pt
             set_tx_size(h, config.cover_title_size)
             idx_fiche = i
