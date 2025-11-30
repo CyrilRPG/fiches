@@ -5,6 +5,7 @@ import re
 import os
 import unicodedata
 import hashlib
+from functools import lru_cache
 from dataclasses import dataclass
 from PIL import Image
 import xml.etree.ElementTree as ET
@@ -809,6 +810,7 @@ def _hamming(a: int, b: int) -> int:
     return bin(a ^ b).count("1")
 
 # ───────────────────────── SVG modèle (annonce) ──────────────────────
+@lru_cache(maxsize=1)
 def _load_svg_model_bytes() -> Optional[bytes]:
     """
     Charge le SVG d'annonce de référence depuis assets/annonce.svg.
@@ -950,6 +952,7 @@ def _normalize_svg(svg_bytes: bytes) -> Optional[bytes]:
     sig = "\n".join(shapes).encode("utf-8")
     return sig
 
+@lru_cache(maxsize=1)
 def _load_cible_svg_model() -> Optional[bytes]:
     """
     Charge le SVG modèle Cible.svg depuis assets/.
@@ -1032,6 +1035,7 @@ def _find_matching_svg_media(parts: Dict[str, bytes], svg_model: bytes) -> Set[s
             matches.add(name)
     return matches
 
+@lru_cache(maxsize=1)
 def _load_default_megaphone_hashes() -> Tuple[Set[str], Set[int]]:
     """
     Charge les icônes 'Annonce' fournies dans le dossier assets comme
@@ -1071,6 +1075,7 @@ def _load_default_megaphone_hashes() -> Tuple[Set[str], Set[int]]:
                     pass
     return sha_hashes, ahashes
 
+@lru_cache(maxsize=1)
 def _load_protected_icon_hashes() -> Tuple[Set[str], Set[int]]:
     """
     Charge les icônes qui ne doivent JAMAIS être supprimées (ex: Cible.png).
@@ -1874,15 +1879,19 @@ st.markdown(
 
 default_config = ProcessingConfig()
 
-# Charger l'image de légende par défaut depuis assets
-default_legend_path = os.path.join("assets", "Legende.png")
-default_legend_bytes = None
-if os.path.exists(default_legend_path):
+@lru_cache(maxsize=1)
+def _load_default_legend_bytes() -> Optional[bytes]:
+    """Charge l'image de légende par défaut sans répéter les accès disque."""
+    default_legend_path = os.path.join("assets", "Legende.png")
     try:
-        with open(default_legend_path, "rb") as f:
-            default_legend_bytes = f.read()
-    except Exception:
-        default_legend_bytes = None
+        if os.path.exists(default_legend_path):
+            with open(default_legend_path, "rb") as f:
+                return f.read()
+    except OSError:
+        return None
+    return None
+
+default_legend_bytes = _load_default_legend_bytes()
 
 with st.sidebar:
     st.header("🛠️ Outils et réglages")
@@ -1987,8 +1996,9 @@ if st.button("⚙️ Harmoniser mes fiches", type="primary", disabled=not files)
         st.warning("Ajoute au moins un fichier .docx")
     else:
         processed: List[Tuple[str, bytes]] = []
-        legend_bytes = default_legend_bytes
-        megaphone_samples = None
+
+        legend_bytes_in_use = legend_bytes if config.enable_legend_insertion else None
+        megaphone_samples_in_use = megaphone_samples if megaphone_samples else None
 
         errors: List[str] = []
 
@@ -1997,8 +2007,8 @@ if st.button("⚙️ Harmoniser mes fiches", type="primary", disabled=not files)
                 original_bytes = up.read()
                 out_bytes = process_bytes(
                     original_bytes,
-                    legend_bytes=legend_bytes if config.enable_legend_insertion else None,
-                    megaphone_samples=megaphone_samples or None,
+                    legend_bytes=legend_bytes_in_use,
+                    megaphone_samples=megaphone_samples_in_use,
                     config=config,
                     icon_left=icon_left,
                     icon_top=icon_top,
