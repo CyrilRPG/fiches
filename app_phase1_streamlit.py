@@ -1012,11 +1012,16 @@ def _identify_svg_to_remove(parts: Dict[str, bytes]) -> Set[str]:
     """
     Parcourt TOUS les fichiers word/media/*.svg et identifie ceux à supprimer.
     Règle simplifiée et robuste basée sur les IDs internes des icônes :
-      - SVG contenant \"Icons_Bullseye\"  => CIBLE, à garder
-      - SVG contenant \"Icons_Megaphone\" => ANNONCE, à supprimer
+      - SVG contenant "Icons_Bullseye"  => CIBLE, à garder
+      - SVG contenant "Icons_Megaphone" => ANNONCE, à supprimer
       - tout autre SVG                   => à supprimer
     """
     svg_to_remove: Set[str] = set()
+
+    # Signature normalisée du SVG cible (si disponible). Permet de préserver
+    # les variantes qui n'exposent pas l'ID Icons_Bullseye.
+    cible_svg_model = _load_cible_svg_model()
+    cible_svg_sig = _normalize_svg(cible_svg_model) if cible_svg_model else None
 
     # Parcourir tous les SVG du paquet Word
     for name, data in parts.items():
@@ -1027,15 +1032,23 @@ def _identify_svg_to_remove(parts: Dict[str, bytes]) -> Set[str]:
             continue
 
         # Heuristique basée sur l'attribut id vu dans les SVG Word :
-        #   - id=\"Icons_Bullseye\"  => cible à préserver
-        #   - id=\"Icons_Megaphone\" => annonce à supprimer
+        #   - id="Icons_Bullseye"  => cible à préserver
+        #   - id="Icons_Megaphone" => annonce à supprimer
         data_lower = data.lower()
         if b'icons_bullseye' in data_lower or CIBLE_SVG_SNIP in data:
             # Cible : on la garde
             continue
+
+        # Si aucune signature explicite n'est présente, comparer la forme
+        # normalisée au SVG cible pour ne conserver que les vraies cibles.
+        if cible_svg_sig:
+            sig = _normalize_svg(data)
+            if sig and sig == cible_svg_sig:
+                continue
+
         # Tout le reste (dont icons_megaphone*) est à supprimer
         svg_to_remove.add(name)
-    
+
     return svg_to_remove
 
 def _find_matching_svg_media(parts: Dict[str, bytes], svg_model: bytes) -> Set[str]:
