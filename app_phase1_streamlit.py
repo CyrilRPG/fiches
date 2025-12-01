@@ -21,8 +21,9 @@ R   = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 P_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
 WPS = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
 VML_NS = "urn:schemas-microsoft-com:vml"
+MC = "http://schemas.openxmlformats.org/markup-compatibility/2006"
 
-NS = {"w": W, "wp": WP, "a": A, "pic": PIC, "r": R, "wps": WPS, "v": VML_NS}
+NS = {"w": W, "wp": WP, "a": A, "pic": PIC, "r": R, "wps": WPS, "v": VML_NS, "mc": MC}
 for k, v in NS.items():
     ET.register_namespace(k, v)
 
@@ -41,6 +42,21 @@ ANNONCE_SVG_SNIP = b"M1.98047 8.62184C1.88751 8.46071"
 CIBLE_SVG_SNIP   = b"M12.2656 2.73438 12.1094 1.32812"
 
 ROMAN_TITLE_RE = re.compile(r"^\s*[IVXLC]+\s*[.)]?\s+.+", re.IGNORECASE)
+
+IGNORABLE_NAMESPACE_MAP: Dict[str, str] = {
+    "w14": "http://schemas.microsoft.com/office/word/2010/wordml",
+    "w15": "http://schemas.microsoft.com/office/word/2012/wordml",
+    "w16se": "http://schemas.microsoft.com/office/word/2015/wordml/symex",
+    "w16cid": "http://schemas.microsoft.com/office/word/2016/wordml/cid",
+    "w16sdtdh": "http://schemas.microsoft.com/office/word/2016/wordml/sdtdatahash",
+    "wp14": "http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing",
+    "wpc": "http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas",
+    "wpg": "http://schemas.microsoft.com/office/word/2010/wordprocessingGroup",
+    "wpi": "http://schemas.microsoft.com/office/word/2010/wordprocessingInk",
+    "wps": WPS,
+    "wne": "http://schemas.microsoft.com/office/word/2006/wordml",
+    "sl": "http://schemas.openxmlformats.org/schemaLibrary/2006/main",
+}
 
 # ───────────────────────── Utils ───────────────────────────────────
 def cm_to_emu(cm: float) -> int:
@@ -104,6 +120,44 @@ def _norm_matchable(s: str) -> str:
     s = s.lower()
     s = re.sub(r"\s+", " ", s).strip()
     return s
+
+def prune_unused_mc_ignorable(root: ET.Element):
+    ignorable = root.get(f"{{{MC}}}Ignorable")
+    if not ignorable:
+        return
+
+    prefixes = [p for p in ignorable.split() if p.strip()]
+    if not prefixes:
+        root.attrib.pop(f"{{{MC}}}Ignorable", None)
+        return
+
+    used_namespaces: Set[str] = set()
+    for node in root.iter():
+        if node.tag.startswith("{"):
+            used_namespaces.add(node.tag.split("}", 1)[0][1:])
+        for attr in node.attrib:
+            if attr.startswith("{"):
+                used_namespaces.add(attr.split("}", 1)[0][1:])
+
+    kept_prefixes: List[str] = []
+    for prefix in prefixes:
+        uri = IGNORABLE_NAMESPACE_MAP.get(prefix)
+        if uri and uri in used_namespaces:
+            kept_prefixes.append(prefix)
+        elif uri is None:
+            if any(ns.endswith(prefix) or ns.endswith(f"/{prefix}") for ns in used_namespaces):
+                kept_prefixes.append(prefix)
+
+    if kept_prefixes:
+        seen: Set[str] = set()
+        ordered = []
+        for p in kept_prefixes:
+            if p not in seen:
+                ordered.append(p)
+                seen.add(p)
+        root.set(f"{{{MC}}}Ignorable", " ".join(ordered))
+    else:
+        root.attrib.pop(f"{{{MC}}}Ignorable", None)
 
 # ───────────────────────── Remplacements texte ─────────────────────
 def replace_years(root):
@@ -1740,6 +1794,7 @@ def process_bytes(
                 protected_hashes, protected_ahashes,
             )
 
+        prune_unused_mc_ignorable(root)
         parts[name] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
     if (
