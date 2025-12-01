@@ -1504,7 +1504,8 @@ def _remove_specific_svg_in_part(
 
 def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET.Element,
                                megaphone_hashes: Set[str], megaphone_ahashes: Set[int],
-                               protected_hashes: Set[str], protected_ahashes: Set[int]) -> None:
+                               protected_hashes: Set[str], protected_ahashes: Set[int],
+                               svg_paths_to_remove: Set[str]) -> None:
     rels_name = _rels_name_for(part_name)
     if rels_name not in parts:
         return
@@ -1544,8 +1545,14 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
             if CIBLE_SVG_SNIP in data:
                 # Cible : on la préserve absolument
                 continue
-            else:
-                svg_should_remove = True
+
+            # Si l'identification amont a marqué ce SVG comme à garder (non présent
+            # dans svg_paths_to_remove), on l'épargne même s'il n'expose plus
+            # explicitement le fragment CIBLE_SVG_SNIP.
+            if media_path not in svg_paths_to_remove:
+                continue
+
+            svg_should_remove = True
         
         data_hash = _sha1(data)
         data_ah = _ahash(data)
@@ -1748,6 +1755,7 @@ def process_bytes(
                 parts, name, root,
                 megaphone_hashes, megaphone_ahashes,
                 protected_hashes, protected_ahashes,
+                svg_paths_to_remove,
             )
 
         parts[name] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
