@@ -1275,16 +1275,15 @@ def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str
         # Obtenir les rIds à supprimer pour cette partie (peut être vide)
         rids_to_remove = media_to_rids.get(name, set())
 
-        # Construire aussi un set de tous les rIds à supprimer (toutes parties confondues)
-        # pour être sûr de tout attraper
-        all_rids_to_remove = set()
-        for rids in media_to_rids.values():
-            all_rids_to_remove.update(rids)
+        # Les rIds sont locaux à chaque partie : ne pas utiliser ceux des autres parts
+        # pour éviter de supprimer des images sans lien avec les SVG ciblés.
+        if not rids_to_remove:
+            continue
 
         changed = False
 
         # Supprimer en amont tous les runs/drawings qui référencent directement ces rIds
-        for rid in all_rids_to_remove:
+        for rid in rids_to_remove:
             if remove_drawing_for_rid(root, rid):
                 changed = True
 
@@ -1293,7 +1292,7 @@ def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str
         # Supprimer les <a:blip r:embed="rId"> et leurs <w:drawing> parents
         for blip in root.findall(".//a:blip", NS):
             rid = blip.get(f"{{{R}}}embed")
-            if rid and (rid in rids_to_remove or rid in all_rids_to_remove):
+            if rid and rid in rids_to_remove:
                 # Remonter jusqu'à w:drawing
                 node = blip
                 drawing = None
@@ -1327,7 +1326,7 @@ def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str
         # Supprimer les <v:imagedata r:id="rId"> et leurs <w:pict> parents
         for imagedata in root.findall(f".//v:imagedata", NS):
             rid = imagedata.get(f"{{{R}}}id")
-            if rid and (rid in rids_to_remove or rid in all_rids_to_remove):
+            if rid and rid in rids_to_remove:
                 # Remonter jusqu'à w:pict
                 node = imagedata
                 pict = None
@@ -1380,11 +1379,6 @@ def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str
             parts[name] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
     
     # Supprimer les relations dans TOUS les .rels
-    # Construire un set global de tous les rIds à supprimer
-    all_rids_to_remove_global = set()
-    for rids in media_to_rids.values():
-        all_rids_to_remove_global.update(rids)
-    
     for name in list(parts.keys()):
         if not name.endswith(".rels"):
             continue
@@ -1398,9 +1392,7 @@ def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str
         
         base_name = name.replace("/_rels/", "/").replace(".rels", "")
         rids_to_remove = media_to_rids.get(base_name, set())
-        
-        # Utiliser aussi le set global pour être sûr de tout attraper
-        if not rids_to_remove and not all_rids_to_remove_global:
+        if not rids_to_remove and not svg_paths_to_remove:
             continue
         
         changed = False
@@ -1409,18 +1401,16 @@ def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str
             tgt = rel.get("Target") or ""
             
             # Supprimer si le rId est dans la liste, OU si la cible est un SVG à supprimer
-            should_remove = False
-            if rid in rids_to_remove or rid in all_rids_to_remove_global:
-                should_remove = True
-            elif tgt:
-                # Vérifier si la cible résolue est un SVG à supprimer
-                resolved = _resolve_target_path(base_name, tgt)
-                if resolved in svg_paths_to_remove:
-                    should_remove = True
-            
-            if should_remove:
+            # Supprimer si le rId est associé à cette partie ou si la cible est
+            # explicitement un SVG à supprimer.
+            if rid in rids_to_remove:
                 rels_root.remove(rel)
                 changed = True
+            elif tgt:
+                resolved = _resolve_target_path(base_name, tgt)
+                if resolved in svg_paths_to_remove:
+                    rels_root.remove(rel)
+                    changed = True
         
         if changed:
             parts[name] = ET.tostring(rels_root, encoding="utf-8", xml_declaration=True)
