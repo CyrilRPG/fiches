@@ -1018,12 +1018,10 @@ def _identify_svg_to_remove(parts: Dict[str, bytes]) -> Set[str]:
     """
     svg_to_remove: Set[str] = set()
 
-    # Parcourir tous les SVG dans word/media/
+    # Parcourir tous les SVG du paquet Word
     for name, data in parts.items():
         lname = name.lower()
         if not lname.startswith("word/"):
-            continue
-        if "/media/" not in lname:
             continue
         if not lname.endswith(".svg"):
             continue
@@ -1032,7 +1030,7 @@ def _identify_svg_to_remove(parts: Dict[str, bytes]) -> Set[str]:
         #   - id=\"Icons_Bullseye\"  => cible à préserver
         #   - id=\"Icons_Megaphone\" => annonce à supprimer
         data_lower = data.lower()
-        if b'icons_bullseye' in data_lower:
+        if b'icons_bullseye' in data_lower or CIBLE_SVG_SNIP in data:
             # Cible : on la garde
             continue
         # Tout le reste (dont icons_megaphone*) est à supprimer
@@ -1350,8 +1348,10 @@ def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str
                     if parent is not None:
                         parent.remove(run)
                         changed = True
-            
-            # Supprimer les paragraphes vides
+
+            # Supprimer uniquement les paragraphes vides du corps principal.
+            # On laisse les paragraphes des en-têtes/pieds ou pièces annexes intactes
+            # pour éviter les erreurs de styles (ex : plan ou pieds de page supprimés).
             for para in root.findall(".//w:p", NS):
                 children = list(para)
                 if not children or all(child.tag in (f"{{{W}}}pPr", f"{{{W}}}rPr") for child in children):
@@ -1359,7 +1359,7 @@ def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str
                     text_content = "".join(t.text or "" for t in para.findall(".//w:t", NS))
                     if not text_content.strip() and not _in_textbox(para):
                         parent = parent_map.get(para)
-                        if parent is not None and parent.tag != f"{{{W}}}body":
+                        if parent is not None and parent.tag == f"{{{W}}}body":
                             parent.remove(para)
                             changed = True
         
