@@ -1504,7 +1504,8 @@ def _remove_specific_svg_in_part(
 
 def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET.Element,
                                megaphone_hashes: Set[str], megaphone_ahashes: Set[int],
-                               protected_hashes: Set[str], protected_ahashes: Set[int]) -> None:
+                               protected_hashes: Set[str], protected_ahashes: Set[int],
+                               svg_paths_to_remove: Set[str]) -> None:
     rels_name = _rels_name_for(part_name)
     if rels_name not in parts:
         return
@@ -1537,15 +1538,13 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
         data_normalized = None
         svg_should_remove = False
 
-        # Règle simple pour les SVG :
-        #   - si le contenu contient le fragment caractéristique de Cible.svg -> on garde
-        #   - sinon -> on supprime (Annonce ou autre SVG)
+        # Règle pour les SVG : s'appuyer sur la liste pré-calculée (incluant la
+        # signature normalisée) pour décider de la suppression.
         if is_svg:
-            if CIBLE_SVG_SNIP in data:
-                # Cible : on la préserve absolument
+            if media_path not in svg_paths_to_remove:
+                # SVG identifiés comme cibles : on les préserve absolument
                 continue
-            else:
-                svg_should_remove = True
+            svg_should_remove = True
         
         data_hash = _sha1(data)
         data_ah = _ahash(data)
@@ -1601,7 +1600,12 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
             continue
         data = parts[media_path]
 
-        # VML porte souvent des bitmap (PNG/EMF) – on applique la même logique de hash
+        # VML porte souvent des bitmap (PNG/EMF) – on applique la même logique de hash.
+        # Pour les SVG, on s'appuie sur la liste pré-calculée.
+        is_svg = media_path.lower().endswith(".svg")
+        if is_svg and media_path not in svg_paths_to_remove:
+            continue
+
         data_hash = _sha1(data)
         data_ah = _ahash(data)
 
@@ -1748,6 +1752,7 @@ def process_bytes(
                 parts, name, root,
                 megaphone_hashes, megaphone_ahashes,
                 protected_hashes, protected_ahashes,
+                svg_paths_to_remove,
             )
 
         parts[name] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
