@@ -19,6 +19,7 @@ A   = "http://schemas.openxmlformats.org/drawingml/2006/main"
 PIC = "http://schemas.openxmlformats.org/drawingml/2006/picture"
 R   = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 P_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
+CT = "http://schemas.openxmlformats.org/package/2006/content-types"
 WPS = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
 VML_NS = "urn:schemas-microsoft-com:vml"
 MC = "http://schemas.openxmlformats.org/markup-compatibility/2006"
@@ -26,6 +27,7 @@ MC = "http://schemas.openxmlformats.org/markup-compatibility/2006"
 NS = {"w": W, "wp": WP, "a": A, "pic": PIC, "r": R, "wps": WPS, "v": VML_NS, "mc": MC}
 for k, v in NS.items():
     ET.register_namespace(k, v)
+ET.register_namespace("", CT)
 
 # ───────────────────────── Règles/constantes ───────────────────────
 # Paires d'années à transformer vers 2025 - 2026 (espaces / tirets flexibles)
@@ -112,6 +114,33 @@ def normalize_spaces(s: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     s = s.replace(" - ", " - ")
     return s
+
+def _detect_image_extension(data: Optional[bytes], filename: Optional[str] = None, fallback: str = "png") -> str:
+    """Détecte l'extension de l'image fournie.
+
+    - On privilégie l'extension fournie dans le nom de fichier si elle est connue.
+    - On tente ensuite de détecter le format via Pillow.
+    - Si les octets ressemblent à un SVG, on renvoie « svg ».
+    - En dernier recours on renvoie le fallback (png par défaut).
+    """
+
+    if filename:
+        ext = os.path.splitext(filename)[1].lower().lstrip(".")
+        if ext in {"png", "jpg", "jpeg", "svg"}:
+            return "jpg" if ext == "jpeg" else ext
+
+    if data:
+        if data.lstrip().lower().startswith(b"<") and b"<svg" in data[:500].lower():
+            return "svg"
+        try:
+            with Image.open(io.BytesIO(data)) as im:
+                fmt = (im.format or "").lower()
+                if fmt in {"png", "jpg", "jpeg", "svg"}:
+                    return "jpg" if fmt == "jpeg" else fmt
+        except Exception:
+            pass
+
+    return fallback
 
 def _norm_matchable(s: str) -> str:
     s = s.replace("\u00A0", " ")
@@ -761,6 +790,7 @@ def remove_legend_cible_icons(root: ET.Element):
 def insert_legend_image(
     document_xml: bytes, rels_xml: bytes, image_bytes: bytes,
     left_cm=2.3, top_cm=23.8, width_cm=5.68, height_cm=3.77,
+    media_name: str = "media/image_legende.png",
 ) -> Tuple[bytes, bytes, Tuple[str, bytes]]:
     root = ET.fromstring(document_xml)
     rels = ET.fromstring(rels_xml)
@@ -777,7 +807,6 @@ def insert_legend_image(
             try: nums.append(int(rid[3:]))
             except Exception: pass
     new_rid = f"rId{(max(nums) if nums else 0) + 1}"
-    media_name = "media/image_legende.png"
     rel = ET.SubElement(rels, f"{{{P_REL}}}Relationship")
     rel.set("Id", new_rid)
     rel.set("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image")
@@ -1271,6 +1300,66 @@ def remove_drawing_for_rid(root: ET.Element, rid: str) -> bool:
 
     return changed
 
+
+def _remove_content_type_overrides(parts: Dict[str, bytes], part_names: Set[str]) -> None:
+    """Nettoie [Content_Types].xml après suppression de médias.
+
+    On retire les balises <Override PartName="..."> qui pointent encore vers des
+    fichiers supprimés (notamment les SVG). Cela évite les réparations Word liées
+    aux types de contenu orphelins.
+    """
+
+    if not part_names:
+        return
+
+    ct_name = "[Content_Types].xml"
+    if ct_name not in parts:
+        return
+
+    try:
+        root = ET.fromstring(parts[ct_name])
+    except ET.ParseError:
+        return
+
+    normalized = {f"/{name}" if not name.startswith("/") else name for name in part_names}
+    changed = False
+
+    for override in list(root.findall(f".//{{{CT}}}Override")):
+        part = override.get("PartName") or ""
+        if part in normalized:
+            root.remove(override)
+            changed = True
+
+    if changed:
+        parts[ct_name] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+
+def _ensure_default_content_type(parts: Dict[str, bytes], extension: str, content_type: str) -> None:
+    """S'assure que [Content_Types].xml contient bien le mime-type voulu."""
+
+    if not extension or not content_type:
+        return
+
+    ct_name = "[Content_Types].xml"
+    if ct_name not in parts:
+        return
+
+    try:
+        root = ET.fromstring(parts[ct_name])
+    except ET.ParseError:
+        return
+
+    ext_lower = extension.lower()
+    already = any(
+        (el.get("Extension") or "").lower() == ext_lower
+        for el in root.findall(f".//{{{CT}}}Default")
+    )
+    if already:
+        return
+
+    ET.SubElement(root, f"{{{CT}}}Default", {"Extension": ext_lower, "ContentType": content_type})
+    parts[ct_name] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
 def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str]) -> None:
     """
     Supprime toutes les références aux SVG identifiés dans toutes les parties du document.
@@ -1469,9 +1558,11 @@ def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str
         if changed:
             parts[name] = ET.tostring(rels_root, encoding="utf-8", xml_declaration=True)
     
-    # Supprimer physiquement les fichiers SVG de parts
-    for svg_path in svg_paths_to_remove:
-        parts.pop(svg_path, None)
+    # Supprimer physiquement les fichiers SVG de parts et nettoyer [Content_Types].xml
+    if svg_paths_to_remove:
+        for svg_path in svg_paths_to_remove:
+            parts.pop(svg_path, None)
+        _remove_content_type_overrides(parts, svg_paths_to_remove)
 
 def _remove_specific_svg_in_part(
     parts: Dict[str, bytes],
@@ -1685,6 +1776,7 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
 def process_bytes(
     docx_bytes: bytes,
     legend_bytes: bytes = None,
+    legend_ext: Optional[str] = None,
     icon_left=15.3,
     icon_top=11.0,
     legend_left=2.3,
@@ -1803,6 +1895,17 @@ def process_bytes(
         and "word/document.xml" in parts
         and "word/_rels/document.xml.rels" in parts
     ):
+        legend_ext = legend_ext or _detect_image_extension(legend_bytes)
+        if legend_ext not in {"png", "jpg", "jpeg", "svg"}:
+            legend_ext = "png"
+        legend_media_name = f"media/image_legende.{legend_ext}"
+        content_types = {
+            "png": "image/png",
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+            "svg": "image/svg+xml",
+        }
+        _ensure_default_content_type(parts, legend_ext, content_types.get(legend_ext, "image/png"))
         parts["word/document.xml"] = remove_legend_text(parts["word/document.xml"])
         new_doc, new_rels, media = insert_legend_image(
             parts["word/document.xml"],
@@ -1812,6 +1915,7 @@ def process_bytes(
             top_cm=cfg.legend_top,
             width_cm=cfg.legend_w,
             height_cm=cfg.legend_h,
+            media_name=legend_media_name,
         )
         parts["word/document.xml"] = new_doc
         parts["word/_rels/document.xml.rels"] = new_rels
@@ -2037,11 +2141,14 @@ with st.sidebar:
 
 # Légende et icônes personnalisées (uploadées ou valeurs par défaut)
 legend_bytes = default_legend_bytes if default_legend_bytes else None
+legend_ext = _detect_image_extension(legend_bytes, filename="Legende.png") if legend_bytes else None
 if legend_upload is not None:
     try:
         legend_bytes = legend_upload.read()
+        legend_ext = _detect_image_extension(legend_bytes, legend_upload.name)
     except Exception:
         legend_bytes = default_legend_bytes
+        legend_ext = _detect_image_extension(legend_bytes, filename="Legende.png") if legend_bytes else None
 
 megaphone_samples = []
 if megaphone_uploads:
@@ -2106,6 +2213,7 @@ if st.button("⚙️ Harmoniser mes fiches", type="primary", disabled=not files)
                 out_bytes = process_bytes(
                     original_bytes,
                     legend_bytes=legend_bytes_in_use,
+                    legend_ext=legend_ext,
                     megaphone_samples=megaphone_samples_in_use,
                     config=config,
                     icon_left=icon_left,
