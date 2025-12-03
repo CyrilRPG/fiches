@@ -896,6 +896,7 @@ class ProcessingConfig:
     enable_footer_resize: bool = True
     enable_megaphone_removal: bool = True
     enable_legend_insertion: bool = True
+    enable_remove_grey_rectangles: bool = True
 
 # ───────────────────────── Suppression mégaphones ──────────────────
 def _sha1(b: bytes) -> str:
@@ -1865,7 +1866,8 @@ def process_bytes(
             if cfg.enable_tables_formatting:
                 tables_and_numbering(root, cfg)
             reposition_small_icon(root, cfg.icon_left, cfg.icon_top)
-            remove_large_grey_rectangles(root, theme_colors)
+            if cfg.enable_remove_grey_rectangles:
+                remove_large_grey_rectangles(root, theme_colors)
             if cfg.enable_red_to_black:
                 force_red_bullets_black_in_paragraphs(root)
 
@@ -2126,6 +2128,11 @@ with st.sidebar:
         enable_force_calibri = st.checkbox("Forcer Calibri partout", value=default_config.enable_force_calibri)
         enable_red_to_black = st.checkbox("Passer les rouges/bleus en noir", value=default_config.enable_red_to_black)
         enable_cover_typo_cleanup = st.checkbox("Harmoniser la couverture", value=default_config.enable_cover_typo_cleanup)
+        enable_remove_grey_rectangles = st.checkbox(
+            "Supprimer le rectangle gris de la couverture",
+            value=default_config.enable_remove_grey_rectangles,
+            help="Décoche si tu veux conserver le rectangle, utile pour diagnostiquer les problèmes de style.",
+        )
         enable_tables_formatting = st.checkbox("Normaliser tableaux et listes", value=default_config.enable_tables_formatting)
         enable_footer_resize = st.checkbox("Ajuster la taille des pieds de page", value=default_config.enable_footer_resize)
         enable_megaphone_removal = st.checkbox("Supprimer les mégaphones d'annonce", value=default_config.enable_megaphone_removal)
@@ -2179,6 +2186,7 @@ config = ProcessingConfig(
     enable_force_calibri=enable_force_calibri,
     enable_red_to_black=enable_red_to_black,
     enable_cover_typo_cleanup=enable_cover_typo_cleanup,
+    enable_remove_grey_rectangles=enable_remove_grey_rectangles,
     enable_tables_formatting=enable_tables_formatting,
     enable_footer_resize=enable_footer_resize,
     enable_megaphone_removal=enable_megaphone_removal,
