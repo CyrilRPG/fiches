@@ -1,3 +1,4 @@
+@@ -1,2037 +1,2080 @@
 # -*- coding: utf-8 -*-
 import io
 import zipfile
@@ -19,15 +20,12 @@ A   = "http://schemas.openxmlformats.org/drawingml/2006/main"
 PIC = "http://schemas.openxmlformats.org/drawingml/2006/picture"
 R   = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 P_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
-CT = "http://schemas.openxmlformats.org/package/2006/content-types"
 WPS = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
 VML_NS = "urn:schemas-microsoft-com:vml"
-MC = "http://schemas.openxmlformats.org/markup-compatibility/2006"
 
-NS = {"w": W, "wp": WP, "a": A, "pic": PIC, "r": R, "wps": WPS, "v": VML_NS, "mc": MC}
+NS = {"w": W, "wp": WP, "a": A, "pic": PIC, "r": R, "wps": WPS, "v": VML_NS}
 for k, v in NS.items():
     ET.register_namespace(k, v)
-ET.register_namespace("", CT)
 
 # ───────────────────────── Règles/constantes ───────────────────────
 # Paires d'années à transformer vers 2025 - 2026 (espaces / tirets flexibles)
@@ -44,21 +42,6 @@ ANNONCE_SVG_SNIP = b"M1.98047 8.62184C1.88751 8.46071"
 CIBLE_SVG_SNIP   = b"M12.2656 2.73438 12.1094 1.32812"
 
 ROMAN_TITLE_RE = re.compile(r"^\s*[IVXLC]+\s*[.)]?\s+.+", re.IGNORECASE)
-
-IGNORABLE_NAMESPACE_MAP: Dict[str, str] = {
-    "w14": "http://schemas.microsoft.com/office/word/2010/wordml",
-    "w15": "http://schemas.microsoft.com/office/word/2012/wordml",
-    "w16se": "http://schemas.microsoft.com/office/word/2015/wordml/symex",
-    "w16cid": "http://schemas.microsoft.com/office/word/2016/wordml/cid",
-    "w16sdtdh": "http://schemas.microsoft.com/office/word/2016/wordml/sdtdatahash",
-    "wp14": "http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing",
-    "wpc": "http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas",
-    "wpg": "http://schemas.microsoft.com/office/word/2010/wordprocessingGroup",
-    "wpi": "http://schemas.microsoft.com/office/word/2010/wordprocessingInk",
-    "wps": WPS,
-    "wne": "http://schemas.microsoft.com/office/word/2006/wordml",
-    "sl": "http://schemas.openxmlformats.org/schemaLibrary/2006/main",
-}
 
 # ───────────────────────── Utils ───────────────────────────────────
 def cm_to_emu(cm: float) -> int:
@@ -115,33 +98,6 @@ def normalize_spaces(s: str) -> str:
     s = s.replace(" - ", " - ")
     return s
 
-def _detect_image_extension(data: Optional[bytes], filename: Optional[str] = None, fallback: str = "png") -> str:
-    """Détecte l'extension de l'image fournie.
-
-    - On privilégie l'extension fournie dans le nom de fichier si elle est connue.
-    - On tente ensuite de détecter le format via Pillow.
-    - Si les octets ressemblent à un SVG, on renvoie « svg ».
-    - En dernier recours on renvoie le fallback (png par défaut).
-    """
-
-    if filename:
-        ext = os.path.splitext(filename)[1].lower().lstrip(".")
-        if ext in {"png", "jpg", "jpeg", "svg"}:
-            return "jpg" if ext == "jpeg" else ext
-
-    if data:
-        if data.lstrip().lower().startswith(b"<") and b"<svg" in data[:500].lower():
-            return "svg"
-        try:
-            with Image.open(io.BytesIO(data)) as im:
-                fmt = (im.format or "").lower()
-                if fmt in {"png", "jpg", "jpeg", "svg"}:
-                    return "jpg" if fmt == "jpeg" else fmt
-        except Exception:
-            pass
-
-    return fallback
-
 def _norm_matchable(s: str) -> str:
     s = s.replace("\u00A0", " ")
     s = unicodedata.normalize("NFKD", s)
@@ -149,44 +105,6 @@ def _norm_matchable(s: str) -> str:
     s = s.lower()
     s = re.sub(r"\s+", " ", s).strip()
     return s
-
-def prune_unused_mc_ignorable(root: ET.Element):
-    ignorable = root.get(f"{{{MC}}}Ignorable")
-    if not ignorable:
-        return
-
-    prefixes = [p for p in ignorable.split() if p.strip()]
-    if not prefixes:
-        root.attrib.pop(f"{{{MC}}}Ignorable", None)
-        return
-
-    used_namespaces: Set[str] = set()
-    for node in root.iter():
-        if node.tag.startswith("{"):
-            used_namespaces.add(node.tag.split("}", 1)[0][1:])
-        for attr in node.attrib:
-            if attr.startswith("{"):
-                used_namespaces.add(attr.split("}", 1)[0][1:])
-
-    kept_prefixes: List[str] = []
-    for prefix in prefixes:
-        uri = IGNORABLE_NAMESPACE_MAP.get(prefix)
-        if uri and uri in used_namespaces:
-            kept_prefixes.append(prefix)
-        elif uri is None:
-            if any(ns.endswith(prefix) or ns.endswith(f"/{prefix}") for ns in used_namespaces):
-                kept_prefixes.append(prefix)
-
-    if kept_prefixes:
-        seen: Set[str] = set()
-        ordered = []
-        for p in kept_prefixes:
-            if p not in seen:
-                ordered.append(p)
-                seen.add(p)
-        root.set(f"{{{MC}}}Ignorable", " ".join(ordered))
-    else:
-        root.attrib.pop(f"{{{MC}}}Ignorable", None)
 
 # ───────────────────────── Remplacements texte ─────────────────────
 def replace_years(root):
@@ -790,7 +708,6 @@ def remove_legend_cible_icons(root: ET.Element):
 def insert_legend_image(
     document_xml: bytes, rels_xml: bytes, image_bytes: bytes,
     left_cm=2.3, top_cm=23.8, width_cm=5.68, height_cm=3.77,
-    media_name: str = "media/image_legende.png",
 ) -> Tuple[bytes, bytes, Tuple[str, bytes]]:
     root = ET.fromstring(document_xml)
     rels = ET.fromstring(rels_xml)
@@ -807,6 +724,7 @@ def insert_legend_image(
             try: nums.append(int(rid[3:]))
             except Exception: pass
     new_rid = f"rId{(max(nums) if nums else 0) + 1}"
+    media_name = "media/image_legende.png"
     rel = ET.SubElement(rels, f"{{{P_REL}}}Relationship")
     rel.set("Id", new_rid)
     rel.set("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image")
@@ -896,7 +814,6 @@ class ProcessingConfig:
     enable_footer_resize: bool = True
     enable_megaphone_removal: bool = True
     enable_legend_insertion: bool = True
-    enable_remove_grey_rectangles: bool = True
 
 # ───────────────────────── Suppression mégaphones ──────────────────
 def _sha1(b: bytes) -> str:
@@ -980,29 +897,29 @@ def _svg_content_matches(svg_bytes: bytes, model_bytes: bytes) -> bool:
     """
     if not svg_bytes or not model_bytes:
         return False
-    
+
     svg_paths = _extract_svg_paths(svg_bytes)
     model_paths = _extract_svg_paths(model_bytes)
-    
+
     if not svg_paths or not model_paths:
         # Si aucun chemin trouvé, comparaison par hash SHA1
         return _sha1(svg_bytes) == _sha1(model_bytes)
-    
+
     # Normaliser et trier les chemins pour comparaison
     svg_paths_sorted = sorted(svg_paths)
     model_paths_sorted = sorted(model_paths)
-    
+
     # Si le nombre de chemins diffère beaucoup, pas de match
     if abs(len(svg_paths_sorted) - len(model_paths_sorted)) > max(1, len(model_paths_sorted) * 0.2):
         return False
-    
+
     # Comparer les chemins : au moins 80% doivent correspondre
     matches = 0
     min_len = min(len(svg_paths_sorted), len(model_paths_sorted))
     for i in range(min_len):
         if svg_paths_sorted[i] == model_paths_sorted[i]:
             matches += 1
-    
+
     # Match si au moins 80% des chemins correspondent
     return matches >= min_len * 0.8
 
@@ -1078,7 +995,7 @@ def _load_cible_svg_model() -> Optional[bytes]:
     except:
         pass
     possible_paths.extend([os.getcwd(), "."])
-    
+
     for base in possible_paths:
         for fname in ["cible.svg", "Cible.svg"]:
             p1 = os.path.join(base, "assets", fname)
@@ -1096,40 +1013,29 @@ def _identify_svg_to_remove(parts: Dict[str, bytes]) -> Set[str]:
     """
     Parcourt TOUS les fichiers word/media/*.svg et identifie ceux à supprimer.
     Règle simplifiée et robuste basée sur les IDs internes des icônes :
-      - SVG contenant "Icons_Bullseye"  => CIBLE, à garder
-      - SVG contenant "Icons_Megaphone" => ANNONCE, à supprimer
+      - SVG contenant \"Icons_Bullseye\"  => CIBLE, à garder
+      - SVG contenant \"Icons_Megaphone\" => ANNONCE, à supprimer
       - tout autre SVG                   => à supprimer
     """
     svg_to_remove: Set[str] = set()
 
-    # Signature normalisée du SVG cible (si disponible). Permet de préserver
-    # les variantes qui n'exposent pas l'ID Icons_Bullseye.
-    cible_svg_model = _load_cible_svg_model()
-    cible_svg_sig = _normalize_svg(cible_svg_model) if cible_svg_model else None
-
-    # Parcourir tous les SVG du paquet Word
+    # Parcourir tous les SVG dans word/media/
     for name, data in parts.items():
         lname = name.lower()
         if not lname.startswith("word/"):
+            continue
+        if "/media/" not in lname:
             continue
         if not lname.endswith(".svg"):
             continue
 
         # Heuristique basée sur l'attribut id vu dans les SVG Word :
-        #   - id="Icons_Bullseye"  => cible à préserver
-        #   - id="Icons_Megaphone" => annonce à supprimer
+        #   - id=\"Icons_Bullseye\"  => cible à préserver
+        #   - id=\"Icons_Megaphone\" => annonce à supprimer
         data_lower = data.lower()
-        if b'icons_bullseye' in data_lower or CIBLE_SVG_SNIP in data:
+        if b'icons_bullseye' in data_lower:
             # Cible : on la garde
             continue
-
-        # Si aucune signature explicite n'est présente, comparer la forme
-        # normalisée au SVG cible pour ne conserver que les vraies cibles.
-        if cible_svg_sig:
-            sig = _normalize_svg(data)
-            if sig and sig == cible_svg_sig:
-                continue
-
         # Tout le reste (dont icons_megaphone*) est à supprimer
         svg_to_remove.add(name)
 
@@ -1171,7 +1077,7 @@ def _load_default_megaphone_hashes() -> Tuple[Set[str], Set[int]]:
     ahashes: Set[int] = set()
     # Icônes d'annonce fournies : PNG et SVG
     candidates = ["Annonce1.png", "Annonce2.png", "Annonce.svg"]
-    
+
     # Essayer plusieurs chemins possibles pour trouver assets
     possible_paths = []
     try:
@@ -1179,7 +1085,7 @@ def _load_default_megaphone_hashes() -> Tuple[Set[str], Set[int]]:
     except:
         pass
     possible_paths.extend([os.getcwd(), "."])
-    
+
     for base_dir in possible_paths:
         for filename in candidates:
             # Essayer avec assets/ devant
@@ -1210,7 +1116,7 @@ def _load_protected_icon_hashes() -> Tuple[Set[str], Set[int]]:
     ahashes: Set[int] = set()
     # Icônes de cible à protéger : PNG et SVG
     candidates = ["Cible.png", "Cible.svg"]
-    
+
     # Essayer plusieurs chemins possibles pour trouver assets
     possible_paths = []
     try:
@@ -1218,7 +1124,7 @@ def _load_protected_icon_hashes() -> Tuple[Set[str], Set[int]]:
     except:
         pass
     possible_paths.extend([os.getcwd(), "."])
-    
+
     for base_dir in possible_paths:
         for filename in candidates:
             # Essayer avec assets/ devant
@@ -1301,66 +1207,6 @@ def remove_drawing_for_rid(root: ET.Element, rid: str) -> bool:
 
     return changed
 
-
-def _remove_content_type_overrides(parts: Dict[str, bytes], part_names: Set[str]) -> None:
-    """Nettoie [Content_Types].xml après suppression de médias.
-
-    On retire les balises <Override PartName="..."> qui pointent encore vers des
-    fichiers supprimés (notamment les SVG). Cela évite les réparations Word liées
-    aux types de contenu orphelins.
-    """
-
-    if not part_names:
-        return
-
-    ct_name = "[Content_Types].xml"
-    if ct_name not in parts:
-        return
-
-    try:
-        root = ET.fromstring(parts[ct_name])
-    except ET.ParseError:
-        return
-
-    normalized = {f"/{name}" if not name.startswith("/") else name for name in part_names}
-    changed = False
-
-    for override in list(root.findall(f".//{{{CT}}}Override")):
-        part = override.get("PartName") or ""
-        if part in normalized:
-            root.remove(override)
-            changed = True
-
-    if changed:
-        parts[ct_name] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
-
-
-def _ensure_default_content_type(parts: Dict[str, bytes], extension: str, content_type: str) -> None:
-    """S'assure que [Content_Types].xml contient bien le mime-type voulu."""
-
-    if not extension or not content_type:
-        return
-
-    ct_name = "[Content_Types].xml"
-    if ct_name not in parts:
-        return
-
-    try:
-        root = ET.fromstring(parts[ct_name])
-    except ET.ParseError:
-        return
-
-    ext_lower = extension.lower()
-    already = any(
-        (el.get("Extension") or "").lower() == ext_lower
-        for el in root.findall(f".//{{{CT}}}Default")
-    )
-    if already:
-        return
-
-    ET.SubElement(root, f"{{{CT}}}Default", {"Extension": ext_lower, "ContentType": content_type})
-    parts[ct_name] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
-
 def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str]) -> None:
     """
     Supprime toutes les références aux SVG identifiés dans toutes les parties du document.
@@ -1371,63 +1217,64 @@ def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str
     """
     if not svg_paths_to_remove:
         return
-    
+
     # Construire un map inversé : chemin media -> rId pour toutes les parties
     media_to_rids: Dict[str, Set[str]] = {}  # part_name -> set of rIds
-    
+
     # Parcourir tous les fichiers .rels pour trouver les références
     for name in list(parts.keys()):
         if not name.endswith(".rels"):
             continue
         if "/_rels/" not in name:
             continue
-        
+
         try:
             rels_root = ET.fromstring(parts[name])
         except ET.ParseError:
             continue
-        
+
         # Déterminer le nom de la partie parente
         base_name = name.replace("/_rels/", "/").replace(".rels", "")
-        
+
         for rel in rels_root.findall(f".//{{{P_REL}}}Relationship"):
             rid = rel.get("Id") or ""
             tgt = rel.get("Target") or ""
             if not rid or not tgt:
                 continue
-            
+
             # Résoudre le chemin complet du média
             media_path = _resolve_target_path(base_name, tgt)
-            
+
             # Si ce média est un SVG à supprimer, noter le rId
             if media_path in svg_paths_to_remove:
                 if base_name not in media_to_rids:
                     media_to_rids[base_name] = set()
                 media_to_rids[base_name].add(rid)
-    
+
     # Maintenant, supprimer toutes les références dans TOUTES les parties XML
     # On parcourt toutes les parties XML, pas seulement celles dans media_to_rids
     for name, data in list(parts.items()):
         if not name.endswith(".xml"):
             continue
-        
+
         try:
             root = ET.fromstring(data)
         except ET.ParseError:
             continue
-        
+
         # Obtenir les rIds à supprimer pour cette partie (peut être vide)
         rids_to_remove = media_to_rids.get(name, set())
 
-        # Les rIds sont locaux à chaque partie : ne pas utiliser ceux des autres parts
-        # pour éviter de supprimer des images sans lien avec les SVG ciblés.
-        if not rids_to_remove:
-            continue
+        # Construire aussi un set de tous les rIds à supprimer (toutes parties confondues)
+        # pour être sûr de tout attraper
+        all_rids_to_remove = set()
+        for rids in media_to_rids.values():
+            all_rids_to_remove.update(rids)
 
         changed = False
 
         # Supprimer en amont tous les runs/drawings qui référencent directement ces rIds
-        for rid in rids_to_remove:
+        for rid in all_rids_to_remove:
             if remove_drawing_for_rid(root, rid):
                 changed = True
 
@@ -1436,7 +1283,7 @@ def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str
         # Supprimer les <a:blip r:embed="rId"> et leurs <w:drawing> parents
         for blip in root.findall(".//a:blip", NS):
             rid = blip.get(f"{{{R}}}embed")
-            if rid and rid in rids_to_remove:
+            if rid and (rid in rids_to_remove or rid in all_rids_to_remove):
                 # Remonter jusqu'à w:drawing
                 node = blip
                 drawing = None
@@ -1445,7 +1292,7 @@ def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str
                         drawing = node
                         break
                     node = parent_map.get(node)
-                
+
                 if drawing is not None:
                     # Supprimer le drawing, ou remonter jusqu'au run parent si nécessaire
                     parent = parent_map.get(drawing)
@@ -1466,11 +1313,11 @@ def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str
                             if run_parent is not None:
                                 run_parent.remove(run)
                                 changed = True
-        
+
         # Supprimer les <v:imagedata r:id="rId"> et leurs <w:pict> parents
         for imagedata in root.findall(f".//v:imagedata", NS):
             rid = imagedata.get(f"{{{R}}}id")
-            if rid and rid in rids_to_remove:
+            if rid and (rid in rids_to_remove or rid in all_rids_to_remove):
                 # Remonter jusqu'à w:pict
                 node = imagedata
                 pict = None
@@ -1479,13 +1326,13 @@ def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str
                         pict = node
                         break
                     node = parent_map.get(node)
-                
+
                 if pict is not None:
                     parent = parent_map.get(pict)
                     if parent is not None:
                         parent.remove(pict)
                         changed = True
-        
+
         # Nettoyer les runs vides après suppression des drawings
         if changed:
             def _in_textbox(node: ET.Element) -> bool:
@@ -1505,65 +1352,71 @@ def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str
                         parent.remove(run)
                         changed = True
 
-            # Supprimer uniquement les paragraphes vides du corps principal.
-            # On laisse les paragraphes des en-têtes/pieds ou pièces annexes intactes
-            # pour éviter les erreurs de styles (ex : plan ou pieds de page supprimés).
+            # Supprimer les paragraphes vides
             for para in root.findall(".//w:p", NS):
                 children = list(para)
                 if not children or all(child.tag in (f"{{{W}}}pPr", f"{{{W}}}rPr") for child in children):
                     # Vérifier qu'il n'y a pas de texte
                     text_content = "".join(t.text or "" for t in para.findall(".//w:t", NS))
+                    if not text_content.strip():
                     if not text_content.strip() and not _in_textbox(para):
                         parent = parent_map.get(para)
-                        if parent is not None and parent.tag == f"{{{W}}}body":
+                        if parent is not None and parent.tag != f"{{{W}}}body":
                             parent.remove(para)
                             changed = True
-        
+
         if changed:
             parts[name] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
-    
+
     # Supprimer les relations dans TOUS les .rels
+    # Construire un set global de tous les rIds à supprimer
+    all_rids_to_remove_global = set()
+    for rids in media_to_rids.values():
+        all_rids_to_remove_global.update(rids)
+
     for name in list(parts.keys()):
         if not name.endswith(".rels"):
             continue
         if "/_rels/" not in name:
             continue
-        
+
         try:
             rels_root = ET.fromstring(parts[name])
         except ET.ParseError:
             continue
-        
+
         base_name = name.replace("/_rels/", "/").replace(".rels", "")
         rids_to_remove = media_to_rids.get(base_name, set())
-        if not rids_to_remove and not svg_paths_to_remove:
+
+        # Utiliser aussi le set global pour être sûr de tout attraper
+        if not rids_to_remove and not all_rids_to_remove_global:
             continue
-        
+
         changed = False
         for rel in list(rels_root.findall(f".//{{{P_REL}}}Relationship")):
             rid = rel.get("Id") or ""
             tgt = rel.get("Target") or ""
-            
+
             # Supprimer si le rId est dans la liste, OU si la cible est un SVG à supprimer
-            # Supprimer si le rId est associé à cette partie ou si la cible est
-            # explicitement un SVG à supprimer.
-            if rid in rids_to_remove:
-                rels_root.remove(rel)
-                changed = True
+            should_remove = False
+            if rid in rids_to_remove or rid in all_rids_to_remove_global:
+                should_remove = True
             elif tgt:
+                # Vérifier si la cible résolue est un SVG à supprimer
                 resolved = _resolve_target_path(base_name, tgt)
                 if resolved in svg_paths_to_remove:
-                    rels_root.remove(rel)
-                    changed = True
-        
+                    should_remove = True
+
+            if should_remove:
+                rels_root.remove(rel)
+                changed = True
+
         if changed:
             parts[name] = ET.tostring(rels_root, encoding="utf-8", xml_declaration=True)
-    
-    # Supprimer physiquement les fichiers SVG de parts et nettoyer [Content_Types].xml
-    if svg_paths_to_remove:
-        for svg_path in svg_paths_to_remove:
-            parts.pop(svg_path, None)
-        _remove_content_type_overrides(parts, svg_paths_to_remove)
+
+    # Supprimer physiquement les fichiers SVG de parts
+    for svg_path in svg_paths_to_remove:
+        parts.pop(svg_path, None)
 
 def _remove_specific_svg_in_part(
     parts: Dict[str, bytes],
@@ -1667,7 +1520,7 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
         if media_path not in parts:
             continue
         data = parts[media_path]
-        
+
         # Vérifier si c'est un SVG
         is_svg = media_path.lower().endswith(".svg")
         data_normalized = None
@@ -1682,7 +1535,7 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
                 continue
             else:
                 svg_should_remove = True
-        
+
         data_hash = _sha1(data)
         data_ah = _ahash(data)
 
@@ -1698,7 +1551,7 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
         if not match_hash and data_ah is not None and megaphone_ahashes:
             if min(_hamming(data_ah, ah) for ah in megaphone_ahashes) <= 5:
                 match_hash = True
-        
+
         # Pour les SVG non-cible, forcer la suppression
         if is_svg and svg_should_remove:
             match_hash = True
@@ -1777,7 +1630,6 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
 def process_bytes(
     docx_bytes: bytes,
     legend_bytes: bytes = None,
-    legend_ext: Optional[str] = None,
     icon_left=15.3,
     icon_top=11.0,
     legend_left=2.3,
@@ -1802,7 +1654,7 @@ def process_bytes(
 
     # NOUVELLE APPROCHE : Identifier tous les SVG à supprimer (tous sauf Cible.svg)
     svg_paths_to_remove = _identify_svg_to_remove(parts)
-    
+
     # Debug détaillé
     total_svg_count = sum(1 for n in parts.keys() if n.lower().endswith(".svg") and "/media/" in n.lower())
     cible_svg_count = total_svg_count - len(svg_paths_to_remove)
@@ -1814,7 +1666,7 @@ def process_bytes(
             print(f"[DEBUG SVG] Chemins SVG à supprimer : {list(svg_paths_to_remove)[:5]}...")  # Limiter à 5 pour éviter spam
     except Exception:
         pass
-    
+
     # Supprimer toutes les références aux SVG identifiés
     _remove_svg_references(parts, svg_paths_to_remove)
 
@@ -1866,8 +1718,7 @@ def process_bytes(
             if cfg.enable_tables_formatting:
                 tables_and_numbering(root, cfg)
             reposition_small_icon(root, cfg.icon_left, cfg.icon_top)
-            if cfg.enable_remove_grey_rectangles:
-                remove_large_grey_rectangles(root, theme_colors)
+            remove_large_grey_rectangles(root, theme_colors)
             if cfg.enable_red_to_black:
                 force_red_bullets_black_in_paragraphs(root)
 
@@ -1888,7 +1739,6 @@ def process_bytes(
                 protected_hashes, protected_ahashes,
             )
 
-        prune_unused_mc_ignorable(root)
         parts[name] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
     if (
@@ -1897,17 +1747,6 @@ def process_bytes(
         and "word/document.xml" in parts
         and "word/_rels/document.xml.rels" in parts
     ):
-        legend_ext = legend_ext or _detect_image_extension(legend_bytes)
-        if legend_ext not in {"png", "jpg", "jpeg", "svg"}:
-            legend_ext = "png"
-        legend_media_name = f"media/image_legende.{legend_ext}"
-        content_types = {
-            "png": "image/png",
-            "jpg": "image/jpeg",
-            "jpeg": "image/jpeg",
-            "svg": "image/svg+xml",
-        }
-        _ensure_default_content_type(parts, legend_ext, content_types.get(legend_ext, "image/png"))
         parts["word/document.xml"] = remove_legend_text(parts["word/document.xml"])
         new_doc, new_rels, media = insert_legend_image(
             parts["word/document.xml"],
@@ -1917,7 +1756,6 @@ def process_bytes(
             top_cm=cfg.legend_top,
             width_cm=cfg.legend_w,
             height_cm=cfg.legend_h,
-            media_name=legend_media_name,
         )
         parts["word/document.xml"] = new_doc
         parts["word/_rels/document.xml.rels"] = new_rels
@@ -2128,11 +1966,6 @@ with st.sidebar:
         enable_force_calibri = st.checkbox("Forcer Calibri partout", value=default_config.enable_force_calibri)
         enable_red_to_black = st.checkbox("Passer les rouges/bleus en noir", value=default_config.enable_red_to_black)
         enable_cover_typo_cleanup = st.checkbox("Harmoniser la couverture", value=default_config.enable_cover_typo_cleanup)
-        enable_remove_grey_rectangles = st.checkbox(
-            "Supprimer le rectangle gris de la couverture",
-            value=default_config.enable_remove_grey_rectangles,
-            help="Décoche si tu veux conserver le rectangle, utile pour diagnostiquer les problèmes de style.",
-        )
         enable_tables_formatting = st.checkbox("Normaliser tableaux et listes", value=default_config.enable_tables_formatting)
         enable_footer_resize = st.checkbox("Ajuster la taille des pieds de page", value=default_config.enable_footer_resize)
         enable_megaphone_removal = st.checkbox("Supprimer les mégaphones d'annonce", value=default_config.enable_megaphone_removal)
@@ -2148,14 +1981,11 @@ with st.sidebar:
 
 # Légende et icônes personnalisées (uploadées ou valeurs par défaut)
 legend_bytes = default_legend_bytes if default_legend_bytes else None
-legend_ext = _detect_image_extension(legend_bytes, filename="Legende.png") if legend_bytes else None
 if legend_upload is not None:
     try:
         legend_bytes = legend_upload.read()
-        legend_ext = _detect_image_extension(legend_bytes, legend_upload.name)
     except Exception:
         legend_bytes = default_legend_bytes
-        legend_ext = _detect_image_extension(legend_bytes, filename="Legende.png") if legend_bytes else None
 
 megaphone_samples = []
 if megaphone_uploads:
@@ -2186,7 +2016,6 @@ config = ProcessingConfig(
     enable_force_calibri=enable_force_calibri,
     enable_red_to_black=enable_red_to_black,
     enable_cover_typo_cleanup=enable_cover_typo_cleanup,
-    enable_remove_grey_rectangles=enable_remove_grey_rectangles,
     enable_tables_formatting=enable_tables_formatting,
     enable_footer_resize=enable_footer_resize,
     enable_megaphone_removal=enable_megaphone_removal,
@@ -2221,7 +2050,6 @@ if st.button("⚙️ Harmoniser mes fiches", type="primary", disabled=not files)
                 out_bytes = process_bytes(
                     original_bytes,
                     legend_bytes=legend_bytes_in_use,
-                    legend_ext=legend_ext,
                     megaphone_samples=megaphone_samples_in_use,
                     config=config,
                     icon_left=icon_left,
