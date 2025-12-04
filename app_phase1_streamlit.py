@@ -1,4 +1,3 @@
-@@ -1,2037 +1,2080 @@
 # -*- coding: utf-8 -*-
 import io
 import zipfile
@@ -897,29 +896,29 @@ def _svg_content_matches(svg_bytes: bytes, model_bytes: bytes) -> bool:
     """
     if not svg_bytes or not model_bytes:
         return False
-
+    
     svg_paths = _extract_svg_paths(svg_bytes)
     model_paths = _extract_svg_paths(model_bytes)
-
+    
     if not svg_paths or not model_paths:
         # Si aucun chemin trouvé, comparaison par hash SHA1
         return _sha1(svg_bytes) == _sha1(model_bytes)
-
+    
     # Normaliser et trier les chemins pour comparaison
     svg_paths_sorted = sorted(svg_paths)
     model_paths_sorted = sorted(model_paths)
-
+    
     # Si le nombre de chemins diffère beaucoup, pas de match
     if abs(len(svg_paths_sorted) - len(model_paths_sorted)) > max(1, len(model_paths_sorted) * 0.2):
         return False
-
+    
     # Comparer les chemins : au moins 80% doivent correspondre
     matches = 0
     min_len = min(len(svg_paths_sorted), len(model_paths_sorted))
     for i in range(min_len):
         if svg_paths_sorted[i] == model_paths_sorted[i]:
             matches += 1
-
+    
     # Match si au moins 80% des chemins correspondent
     return matches >= min_len * 0.8
 
@@ -995,7 +994,7 @@ def _load_cible_svg_model() -> Optional[bytes]:
     except:
         pass
     possible_paths.extend([os.getcwd(), "."])
-
+    
     for base in possible_paths:
         for fname in ["cible.svg", "Cible.svg"]:
             p1 = os.path.join(base, "assets", fname)
@@ -1038,7 +1037,7 @@ def _identify_svg_to_remove(parts: Dict[str, bytes]) -> Set[str]:
             continue
         # Tout le reste (dont icons_megaphone*) est à supprimer
         svg_to_remove.add(name)
-
+    
     return svg_to_remove
 
 def _find_matching_svg_media(parts: Dict[str, bytes], svg_model: bytes) -> Set[str]:
@@ -1077,7 +1076,7 @@ def _load_default_megaphone_hashes() -> Tuple[Set[str], Set[int]]:
     ahashes: Set[int] = set()
     # Icônes d'annonce fournies : PNG et SVG
     candidates = ["Annonce1.png", "Annonce2.png", "Annonce.svg"]
-
+    
     # Essayer plusieurs chemins possibles pour trouver assets
     possible_paths = []
     try:
@@ -1085,7 +1084,7 @@ def _load_default_megaphone_hashes() -> Tuple[Set[str], Set[int]]:
     except:
         pass
     possible_paths.extend([os.getcwd(), "."])
-
+    
     for base_dir in possible_paths:
         for filename in candidates:
             # Essayer avec assets/ devant
@@ -1116,7 +1115,7 @@ def _load_protected_icon_hashes() -> Tuple[Set[str], Set[int]]:
     ahashes: Set[int] = set()
     # Icônes de cible à protéger : PNG et SVG
     candidates = ["Cible.png", "Cible.svg"]
-
+    
     # Essayer plusieurs chemins possibles pour trouver assets
     possible_paths = []
     try:
@@ -1124,7 +1123,7 @@ def _load_protected_icon_hashes() -> Tuple[Set[str], Set[int]]:
     except:
         pass
     possible_paths.extend([os.getcwd(), "."])
-
+    
     for base_dir in possible_paths:
         for filename in candidates:
             # Essayer avec assets/ devant
@@ -1217,51 +1216,51 @@ def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str
     """
     if not svg_paths_to_remove:
         return
-
+    
     # Construire un map inversé : chemin media -> rId pour toutes les parties
     media_to_rids: Dict[str, Set[str]] = {}  # part_name -> set of rIds
-
+    
     # Parcourir tous les fichiers .rels pour trouver les références
     for name in list(parts.keys()):
         if not name.endswith(".rels"):
             continue
         if "/_rels/" not in name:
             continue
-
+        
         try:
             rels_root = ET.fromstring(parts[name])
         except ET.ParseError:
             continue
-
+        
         # Déterminer le nom de la partie parente
         base_name = name.replace("/_rels/", "/").replace(".rels", "")
-
+        
         for rel in rels_root.findall(f".//{{{P_REL}}}Relationship"):
             rid = rel.get("Id") or ""
             tgt = rel.get("Target") or ""
             if not rid or not tgt:
                 continue
-
+            
             # Résoudre le chemin complet du média
             media_path = _resolve_target_path(base_name, tgt)
-
+            
             # Si ce média est un SVG à supprimer, noter le rId
             if media_path in svg_paths_to_remove:
                 if base_name not in media_to_rids:
                     media_to_rids[base_name] = set()
                 media_to_rids[base_name].add(rid)
-
+    
     # Maintenant, supprimer toutes les références dans TOUTES les parties XML
     # On parcourt toutes les parties XML, pas seulement celles dans media_to_rids
     for name, data in list(parts.items()):
         if not name.endswith(".xml"):
             continue
-
+        
         try:
             root = ET.fromstring(data)
         except ET.ParseError:
             continue
-
+        
         # Obtenir les rIds à supprimer pour cette partie (peut être vide)
         rids_to_remove = media_to_rids.get(name, set())
 
@@ -1292,7 +1291,7 @@ def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str
                         drawing = node
                         break
                     node = parent_map.get(node)
-
+                
                 if drawing is not None:
                     # Supprimer le drawing, ou remonter jusqu'au run parent si nécessaire
                     parent = parent_map.get(drawing)
@@ -1313,7 +1312,7 @@ def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str
                             if run_parent is not None:
                                 run_parent.remove(run)
                                 changed = True
-
+        
         # Supprimer les <v:imagedata r:id="rId"> et leurs <w:pict> parents
         for imagedata in root.findall(f".//v:imagedata", NS):
             rid = imagedata.get(f"{{{R}}}id")
@@ -1326,13 +1325,13 @@ def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str
                         pict = node
                         break
                     node = parent_map.get(node)
-
+                
                 if pict is not None:
                     parent = parent_map.get(pict)
                     if parent is not None:
                         parent.remove(pict)
                         changed = True
-
+        
         # Nettoyer les runs vides après suppression des drawings
         if changed:
             def _in_textbox(node: ET.Element) -> bool:
@@ -1351,52 +1350,51 @@ def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str
                     if parent is not None:
                         parent.remove(run)
                         changed = True
-
+            
             # Supprimer les paragraphes vides
             for para in root.findall(".//w:p", NS):
                 children = list(para)
                 if not children or all(child.tag in (f"{{{W}}}pPr", f"{{{W}}}rPr") for child in children):
                     # Vérifier qu'il n'y a pas de texte
                     text_content = "".join(t.text or "" for t in para.findall(".//w:t", NS))
-                    if not text_content.strip():
                     if not text_content.strip() and not _in_textbox(para):
                         parent = parent_map.get(para)
                         if parent is not None and parent.tag != f"{{{W}}}body":
                             parent.remove(para)
                             changed = True
-
+        
         if changed:
             parts[name] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
-
+    
     # Supprimer les relations dans TOUS les .rels
     # Construire un set global de tous les rIds à supprimer
     all_rids_to_remove_global = set()
     for rids in media_to_rids.values():
         all_rids_to_remove_global.update(rids)
-
+    
     for name in list(parts.keys()):
         if not name.endswith(".rels"):
             continue
         if "/_rels/" not in name:
             continue
-
+        
         try:
             rels_root = ET.fromstring(parts[name])
         except ET.ParseError:
             continue
-
+        
         base_name = name.replace("/_rels/", "/").replace(".rels", "")
         rids_to_remove = media_to_rids.get(base_name, set())
-
+        
         # Utiliser aussi le set global pour être sûr de tout attraper
         if not rids_to_remove and not all_rids_to_remove_global:
             continue
-
+        
         changed = False
         for rel in list(rels_root.findall(f".//{{{P_REL}}}Relationship")):
             rid = rel.get("Id") or ""
             tgt = rel.get("Target") or ""
-
+            
             # Supprimer si le rId est dans la liste, OU si la cible est un SVG à supprimer
             should_remove = False
             if rid in rids_to_remove or rid in all_rids_to_remove_global:
@@ -1406,14 +1404,14 @@ def _remove_svg_references(parts: Dict[str, bytes], svg_paths_to_remove: Set[str
                 resolved = _resolve_target_path(base_name, tgt)
                 if resolved in svg_paths_to_remove:
                     should_remove = True
-
+            
             if should_remove:
                 rels_root.remove(rel)
                 changed = True
-
+        
         if changed:
             parts[name] = ET.tostring(rels_root, encoding="utf-8", xml_declaration=True)
-
+    
     # Supprimer physiquement les fichiers SVG de parts
     for svg_path in svg_paths_to_remove:
         parts.pop(svg_path, None)
@@ -1520,7 +1518,7 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
         if media_path not in parts:
             continue
         data = parts[media_path]
-
+        
         # Vérifier si c'est un SVG
         is_svg = media_path.lower().endswith(".svg")
         data_normalized = None
@@ -1535,7 +1533,7 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
                 continue
             else:
                 svg_should_remove = True
-
+        
         data_hash = _sha1(data)
         data_ah = _ahash(data)
 
@@ -1551,7 +1549,7 @@ def _remove_megaphones_in_part(parts: Dict[str, bytes], part_name: str, root: ET
         if not match_hash and data_ah is not None and megaphone_ahashes:
             if min(_hamming(data_ah, ah) for ah in megaphone_ahashes) <= 5:
                 match_hash = True
-
+        
         # Pour les SVG non-cible, forcer la suppression
         if is_svg and svg_should_remove:
             match_hash = True
@@ -1654,7 +1652,7 @@ def process_bytes(
 
     # NOUVELLE APPROCHE : Identifier tous les SVG à supprimer (tous sauf Cible.svg)
     svg_paths_to_remove = _identify_svg_to_remove(parts)
-
+    
     # Debug détaillé
     total_svg_count = sum(1 for n in parts.keys() if n.lower().endswith(".svg") and "/media/" in n.lower())
     cible_svg_count = total_svg_count - len(svg_paths_to_remove)
@@ -1666,7 +1664,7 @@ def process_bytes(
             print(f"[DEBUG SVG] Chemins SVG à supprimer : {list(svg_paths_to_remove)[:5]}...")  # Limiter à 5 pour éviter spam
     except Exception:
         pass
-
+    
     # Supprimer toutes les références aux SVG identifiés
     _remove_svg_references(parts, svg_paths_to_remove)
 
